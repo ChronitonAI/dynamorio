@@ -1,0 +1,3 @@
+arch_prctl gs base ok
+arch_prctl bad gs base ok
+all done

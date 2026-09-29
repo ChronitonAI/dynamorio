@@ -6180,6 +6180,10 @@ if (UNIX)
       link_with_pthread(linux.synchall-restore)
     endif ()
 
+    if (LINUX AND X86 AND X64)
+      tobuild(linux.segment_base linux/segment_base.c)
+    endif ()
+
     if (NOT ANDROID)
       tobuild(linux.threadexit2 linux/threadexit2.c) # XXX i#1874: hangs on Android
       tobuild(linux.signalfd linux/signalfd.c) # XXX i#1874: fails natively on Android
