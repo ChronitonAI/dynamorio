@@ -1734,6 +1734,10 @@ DYNAMIC_OPTION_DEFAULT(bool, follow_children, true,
                        "inject into all spawned processes unless preinjector is set up "
                        "to inject into them or they have app-specific RUNUNDER_OFF")
 /* not dynamic do to interactions with -early_inject */
+/* On UNIX this applies to execve: with -no_follow_children, a child is followed only
+ * if its configuration says so and -follow_systemwide is on, so turning both off
+ * leaves execve untouched.
+ */
 OPTION_DEFAULT(bool, follow_systemwide, true,
                "inject into all spawned processes that are configured to run under dr "
                "(app specific RUNUNDER_ON, or no app specific and RUNUNDER_ALL in the "
