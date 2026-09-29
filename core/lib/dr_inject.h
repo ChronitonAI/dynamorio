@@ -224,6 +224,110 @@ dr_inject_prepare_new_process_group(void *data);
 
 #endif /* UNIX */
 
+#ifdef LINUX
+/**
+ * The value of #dr_ptrace_takeover_args_t.argc.  It occupies the place of the
+ * argument count on the initial stack of a new process, which is never negative.
+ */
+#    define DR_PTRACE_TAKEOVER_ARGC (-2)
+/** The value of #dr_ptrace_takeover_args_t.magic ("DRPTRACE"). */
+#    define DR_PTRACE_TAKEOVER_MAGIC 0x4543415254505244ULL
+/** The current value of #dr_ptrace_takeover_args_t.version. */
+#    define DR_PTRACE_TAKEOVER_VERSION 1
+/** The size of #dr_ptrace_takeover_args_t.options. */
+#    define DR_PTRACE_TAKEOVER_OPTIONS_LENGTH 2048
+
+/** Flags for #dr_ptrace_takeover_args_t.flags. */
+typedef enum {
+    /**
+     * The #dr_ptrace_takeover_args_t.fs_base and #dr_ptrace_takeover_args_t.gs_base
+     * fields are valid and are installed as the application's segment bases before
+     * DynamoRIO initializes.  Only supported on x86-64.
+     */
+    DR_PTRACE_TAKEOVER_SEGMENT_BASES = 0x1,
+} dr_ptrace_takeover_flags_t;
+
+/**
+ * The argument block for injecting DynamoRIO with a custom ptrace-based injector.
+ *
+ * A tool that already controls a process with ptrace (e.g., because it is the
+ * process's tracer and wants to stay its tracer) can inject DynamoRIO itself
+ * instead of using dr_inject_prepare_to_ptrace(), which attaches to and later
+ * detaches from the target.  The steps mirror what that routine does:
+ *
+ * -# Stop the target, e.g., at \p PTRACE_EVENT_EXEC (continue it to the exit of
+ *    the execve system call first, so that register changes are not clobbered
+ *    by the system call's return value).
+ * -# Map the \p PT_LOAD segments of libdynamorio.so into the target as an ELF
+ *    loader would (including zero-filling the bss), at any page-aligned base:
+ *    DynamoRIO relocates itself.
+ * -# Write this structure at a 16-byte-aligned address in the target: e.g., at
+ *    the top of a stack mapped for this purpose, which DynamoRIO then uses for its
+ *    initialization; otherwise below the application's stack pointer and its red
+ *    zone.
+ * -# Set the stack pointer to the address of this structure, zero the \p xdi
+ *    register (x86) and set the program counter to the ELF entry point of
+ *    libdynamorio.so.
+ * -# Resume the target, passing through the signals it receives (DynamoRIO
+ *    raises SIGILL, SIGSEGV and SIGBUS itself during initialization), until it
+ *    stops with a SIGTRAP sent by itself: DynamoRIO has then initialized, and
+ *    resuming the target once more starts the application under DynamoRIO with
+ *    the register state in #mc.
+ *
+ * The injector remains free to stay the target's tracer.  It must pass through
+ * the signals DynamoRIO uses for its own purposes (including the SIGILL it uses
+ * to suspend threads).  If the structure is invalid, DynamoRIO prints an error
+ * and exits the process.
+ *
+ * \warning ptrace injection is still experimental and subject to change.
+ */
+typedef struct _dr_ptrace_takeover_args_t {
+    /** Must be #DR_PTRACE_TAKEOVER_ARGC. */
+    ptr_int_t argc;
+    /** Must be #DR_PTRACE_TAKEOVER_MAGIC. */
+    uint64 magic;
+    /** Must be #DR_PTRACE_TAKEOVER_VERSION. */
+    uint version;
+    /** Must be sizeof(#dr_ptrace_takeover_args_t). */
+    uint size;
+    /** A combination of #dr_ptrace_takeover_flags_t values. */
+    uint64 flags;
+    /**
+     * The page size of the target process (as in its \p AT_PAGESZ auxiliary vector
+     * entry).  If 0, DynamoRIO determines the page size itself, which involves
+     * temporary memory mappings at addresses chosen by the kernel.
+     */
+    uint64 page_size;
+    /** The application's fs base, if #DR_PTRACE_TAKEOVER_SEGMENT_BASES is set. */
+    uint64 fs_base;
+    /** The application's gs base, if #DR_PTRACE_TAKEOVER_SEGMENT_BASES is set. */
+    uint64 gs_base;
+    /**
+     * DynamoRIO's runtime options, in the same format as the options in a
+     * configuration file (e.g., "-code_api -client_lib path;0;client options").
+     * If this string is not empty, DynamoRIO uses it as its options and neither
+     * reads configuration files nor needs a home directory.  If it is empty,
+     * DynamoRIO reads configuration files as with other injection methods,
+     * looking for a local configuration under #home_dir.
+     */
+    char options[DR_PTRACE_TAKEOVER_OPTIONS_LENGTH];
+    /**
+     * The value of \p HOME used to find local configuration files if #options is
+     * empty.  May be empty.
+     */
+    char home_dir[MAXIMUM_PATH];
+    /**
+     * The application state at which DynamoRIO takes over.  The \p size field
+     * must be set to sizeof(#dr_mcontext_t) and the \p flags field must include
+     * #DR_MC_INTEGER and #DR_MC_CONTROL (the latter includes the flags register).
+     * If \p flags includes #DR_MC_MULTIMEDIA, the SIMD register values are used as
+     * well; otherwise, the application starts with these registers zeroed.
+     */
+    dr_mcontext_t mc;
+} dr_ptrace_takeover_args_t;
+
+#endif /* LINUX */
+
 #ifdef WINDOWS
 DR_EXPORT
 /**

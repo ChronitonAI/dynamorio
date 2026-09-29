@@ -472,6 +472,11 @@ os_page_size(void);
 /* This also tries to set other auxv values. */
 void
 os_page_size_init(const char **env, bool env_followed_by_auxv);
+/* For when the page size is known without an auxiliary vector.  Like
+ * os_page_size_init(), may be called before DR is relocated.
+ */
+void
+os_set_page_size(size_t size);
 size_t
 os_minsigstksz(void);
 #endif

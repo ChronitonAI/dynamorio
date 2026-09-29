@@ -54,6 +54,9 @@
 #    include <sys/syscall.h>
 #endif
 #include "tls.h"
+#ifdef LINUX
+#    include "dr_inject.h" /* dr_ptrace_takeover_args_t */
+#endif
 
 #include <dlfcn.h> /* dlsym */
 #ifdef LINUX
@@ -1819,7 +1822,10 @@ static void
 takeover_ptrace(ptrace_stack_args_t *args)
 {
     static char home_var[MAXIMUM_PATH + 6 /*HOME=path\0*/];
-    static char *fake_envp[] = { home_var, NULL };
+    /* The final two entries are an empty auxiliary vector, for code that looks for
+     * one after the environment.
+     */
+    static char *fake_envp[] = { home_var, NULL, NULL, NULL };
 
     /* When we come in via ptrace, we have no idea where the environment
      * pointer is.  We could use /proc/self/environ to read it or go searching
@@ -1843,6 +1849,93 @@ takeover_ptrace(ptrace_stack_args_t *args)
     dynamorio_syscall(SYS_kill, 2, get_process_id(), SIGTRAP);
 
     dynamo_start(&args->mc);
+}
+
+/* Does not return. */
+static void
+takeover_ptrace_args_error(const char *msg)
+{
+    os_write(STDERR, msg, strlen(msg));
+    dynamorio_syscall(SYS_exit_group, 1, -1);
+}
+
+/* Entry point for ptrace injection by a custom injector: see
+ * dr_ptrace_takeover_args_t in dr_inject.h.
+ */
+static void
+takeover_ptrace_ex(dr_ptrace_takeover_args_t *args)
+{
+    static char home_var[sizeof("HOME=") + MAXIMUM_PATH];
+    static char options_var[sizeof(DYNAMORIO_VAR_OPTIONS "=") +
+                            DR_PTRACE_TAKEOVER_OPTIONS_LENGTH];
+    /* Room for one variable and the terminating NULL, followed by an empty
+     * auxiliary vector (relocate_dynamorio() already set the page size).
+     */
+    static char *fake_envp[] = { NULL, NULL, NULL, NULL };
+    priv_mcontext_t mc;
+
+    if (args->magic != DR_PTRACE_TAKEOVER_MAGIC ||
+        args->version != DR_PTRACE_TAKEOVER_VERSION || args->size != sizeof(*args)) {
+        takeover_ptrace_args_error(
+            "DynamoRIO: unsupported ptrace takeover argument block\n");
+    }
+    if (args->mc.size != sizeof(dr_mcontext_t) ||
+        !TESTALL(DR_MC_INTEGER | DR_MC_CONTROL, args->mc.flags)) {
+        takeover_ptrace_args_error(
+            "DynamoRIO: invalid machine context in ptrace takeover argument block\n");
+    }
+
+    /* We have no environment from the kernel, so we create a fake one with just
+     * what we need: our options (in which case we ignore configuration files) or
+     * HOME to find configuration files.
+     */
+    args->options[BUFFER_SIZE_ELEMENTS(args->options) - 1] = '\0';
+    args->home_dir[BUFFER_SIZE_ELEMENTS(args->home_dir) - 1] = '\0';
+    if (args->options[0] != '\0') {
+        snprintf(options_var, BUFFER_SIZE_ELEMENTS(options_var),
+                 DYNAMORIO_VAR_OPTIONS "=%s", args->options);
+        NULL_TERMINATE_BUFFER(options_var);
+        fake_envp[0] = options_var;
+        d_r_config_set_env_only();
+    } else if (args->home_dir[0] != '\0') {
+        snprintf(home_var, BUFFER_SIZE_ELEMENTS(home_var), "HOME=%s", args->home_dir);
+        NULL_TERMINATE_BUFFER(home_var);
+        fake_envp[0] = home_var;
+    }
+    dynamorio_set_envp(fake_envp);
+
+#        if defined(X86) && defined(X64)
+    if (TESTANY(DR_PTRACE_TAKEOVER_SEGMENT_BASES, args->flags)) {
+        /* Install the application's segment bases, where initialization picks
+         * them up as the application's values (see os_tls_app_seg_init()).
+         */
+        if (dynamorio_syscall(SYS_arch_prctl, 2, ARCH_SET_FS, args->fs_base) != 0 ||
+            dynamorio_syscall(SYS_arch_prctl, 2, ARCH_SET_GS, args->gs_base) != 0) {
+            takeover_ptrace_args_error(
+                "DynamoRIO: failed to set segment bases for ptrace takeover\n");
+        }
+    }
+#        else
+    if (TESTANY(DR_PTRACE_TAKEOVER_SEGMENT_BASES, args->flags)) {
+        takeover_ptrace_args_error(
+            "DynamoRIO: segment bases are not supported for ptrace takeover\n");
+    }
+#        endif
+
+    dynamo_control_via_attach = true;
+
+    dynamorio_app_init();
+
+    memset(&mc, 0, sizeof(mc));
+    if (!dr_mcontext_to_priv_mcontext(&mc, &args->mc)) {
+        takeover_ptrace_args_error(
+            "DynamoRIO: invalid machine context in ptrace takeover argument block\n");
+    }
+
+    /* As in takeover_ptrace(), let the injector know that we have initialized. */
+    dynamorio_syscall(SYS_kill, 2, get_process_id(), SIGTRAP);
+
+    dynamo_start(&mc);
 }
 
 static void
@@ -2051,6 +2144,18 @@ relocate_dynamorio(byte *dr_map, size_t dr_size, byte *sp)
     /* We can't use PAGE_SIZE as that may require relocations to access. */
     const int min_page_size = 4096;
 
+    /* Initialize the page size first: relocating needs it and would otherwise find
+     * it by probing with temporary mappings.  This does not need relocations.
+     * For ptrace injection, sp points at an argument block instead of at the
+     * kernel's argc, argv, envp and auxv.
+     */
+    if ((ptr_int_t)argc == DR_PTRACE_TAKEOVER_ARGC) {
+        dr_ptrace_takeover_args_t *args = (dr_ptrace_takeover_args_t *)sp;
+        if (args->magic == DR_PTRACE_TAKEOVER_MAGIC && args->page_size != 0)
+            os_set_page_size(args->page_size);
+    } else if ((ptr_int_t)argc != ARGC_PTRACE_SENTINEL)
+        os_page_size_init(env, true);
+
     if (dr_map == NULL) {
         /* We can't start with the address of relocate_dynamorio or something as that
          * may require relocations to access!
@@ -2068,8 +2173,6 @@ relocate_dynamorio(byte *dr_map, size_t dr_size, byte *sp)
     /* Relocate it */
     if (privload_get_os_privmod_data(dr_map, &opd))
         privload_early_relocate_os_privmod_data(&opd, dr_map);
-
-    os_page_size_init(env, true);
 }
 
 /* i#1227: on a conflict with the app we reload ourselves.
@@ -2201,6 +2304,10 @@ privload_early_inject(void **sp, byte *old_libdr_base, size_t old_libdr_size)
          * can easily find the address of _start in the ELF header.
          */
         takeover_ptrace((ptrace_stack_args_t *)sp);
+        ASSERT_NOT_REACHED();
+    }
+    if (*argc == DR_PTRACE_TAKEOVER_ARGC) {
+        takeover_ptrace_ex((dr_ptrace_takeover_args_t *)sp);
         ASSERT_NOT_REACHED();
     }
 

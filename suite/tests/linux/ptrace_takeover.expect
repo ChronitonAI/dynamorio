@@ -1,0 +1,13 @@
+native run exited with status 0
+DR initialization stayed inside its range
+run under DR exited with status 0
+client: options: -greeting hello
+eflags.ID=1
+gs_base=0x12345000
+no leaked descriptors
+client: exit, saw basic blocks
+the mappings outside DR's range match the native run
+drrun -use_ptrace: eflags.ID=0
+drrun -use_ptrace: gs_base=0x0
+drrun -use_ptrace: no leaked descriptors
+drrun -use_ptrace exited with status 0

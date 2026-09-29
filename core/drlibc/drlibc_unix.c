@@ -565,7 +565,7 @@ os_find_page_size(void)
     return 4096;
 }
 
-static void
+void
 os_set_page_size(size_t size)
 {
     page_size = size; /* atomic write */
@@ -594,7 +594,10 @@ os_minsigstksz(void)
 #else
 #    define MINSIGSTKSZ_DEFAULT 2048
 #endif
-    if (auxv_minsigstksz == 0)
+    /* Like the kernel, we never go below the architectural minimum, even when
+     * AT_MINSIGSTKSZ (the size of a signal frame) is smaller.
+     */
+    if (auxv_minsigstksz < MINSIGSTKSZ_DEFAULT)
         return MINSIGSTKSZ_DEFAULT;
     return auxv_minsigstksz;
 }
@@ -617,16 +620,18 @@ os_page_size_init(const char **env, bool env_followed_by_auxv)
         /* Skip environment. */
         while (*env != 0)
             ++env;
-        /* Look for AT_PAGESZ and other values in the auxiliary vector. */
+        /* Look for AT_PAGESZ and other values in the auxiliary vector.  We scan the
+         * whole vector: the kernel may place AT_MINSIGSTKSZ before AT_PAGESZ (as it
+         * does on x86), and stopping early would leave the page size to be found
+         * by probing with mmap.
+         */
         for (auxv = (ELF_AUXV_TYPE *)(env + 1); auxv->a_type != AT_NULL; auxv++) {
             if (auxv->a_type == AT_PAGESZ) {
                 os_set_page_size(auxv->a_un.a_val);
-                break;
             }
 #    ifdef AT_MINSIGSTKSZ
             else if (auxv->a_type == AT_MINSIGSTKSZ) {
                 auxv_minsigstksz = auxv->a_un.a_val;
-                break;
             }
 #    endif
         }

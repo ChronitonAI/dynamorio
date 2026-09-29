@@ -310,6 +310,16 @@ Further non-compatibility-affecting changes include:
    memory reservations a fatal error instead of falling back to memory obtained from
    the operating system outside of the reservations.
  - Fixed dr_flush_region() crashing when the region was never executed from.
+ - DynamoRIO no longer probes for the page size with temporary memory mappings at
+   startup: it now finds the page size in the auxiliary vector.
+ - Fixed several issues with ptrace injection (drrun -use_ptrace and -attach):
+   the application's flags register is now preserved, the injectee no longer keeps
+   an open file descriptor for libdynamorio.so, and drrun -use_ptrace no longer
+   hangs after the application exits.
+ - Added #dr_ptrace_takeover_args_t to dr_inject.h, which lets a custom injector
+   that stays the ptracer of a process start DynamoRIO in it with a given options
+   string (without configuration files), page size, initial register state and
+   segment bases.
 
 **************************************************
 <hr>

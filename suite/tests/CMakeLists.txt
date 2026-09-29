@@ -6186,6 +6186,25 @@ if (UNIX)
       link_with_pthread(linux.synchall-restore)
     endif ()
 
+    if (LINUX AND X86 AND X64 AND DR_HOST_X86 AND DR_HOST_X64 AND NOT ANDROID)
+      # A custom injector that stays the ptracer of the app and injects DR at the exec
+      # stop using dr_ptrace_takeover_args_t.  It runs natively and uses itself as
+      # the app.
+      add_api_exe(linux.ptrace_takeover linux/ptrace_takeover.c ON OFF)
+      set(DynamoRIO_USE_LIBC OFF)
+      add_library(linux.ptrace_takeover.dll SHARED linux/ptrace_takeover.dll.c)
+      setup_test_client_dll_basics(linux.ptrace_takeover.dll)
+      set(DynamoRIO_USE_LIBC ON)
+      add_dependencies(linux.ptrace_takeover dynamorio linux.ptrace_takeover.dll)
+      DynamoRIO_get_full_path(ptrace_takeover_drlib dynamorio "${location_suffix}")
+      get_target_path_for_execution(ptrace_takeover_client linux.ptrace_takeover.dll
+        "${location_suffix}")
+      get_target_path_for_execution(ptrace_takeover_drrun drrun "${location_suffix}")
+      torunonly_native(linux.ptrace_takeover linux.ptrace_takeover ptrace_takeover
+        linux/ptrace_takeover.c
+        "${ptrace_takeover_drlib};${ptrace_takeover_client};${ptrace_takeover_drrun}")
+    endif ()
+
     if (NOT ANDROID)
       tobuild(linux.threadexit2 linux/threadexit2.c) # XXX i#1874: hangs on Android
       tobuild(linux.signalfd linux/signalfd.c) # XXX i#1874: fails natively on Android

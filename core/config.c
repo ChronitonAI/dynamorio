@@ -179,6 +179,8 @@ typedef struct _config_info_t {
 static config_vals_t myvals;
 static config_info_t config;
 static bool config_initialized;
+/* Whether this process's configuration comes from the environment only. */
+static bool config_env_only;
 
 #    if !defined(NOT_DYNAMORIO_CORE) && !defined(NOT_DYNAMORIO_CORE_PROPER)
 /* i#521: Re-reading the config takes long enough that we can't leave the data
@@ -436,6 +438,10 @@ config_read(config_info_t *cfg, const char *appname_in, process_id_t pid, const 
     int retval;
 #    endif
     ASSERT(cfg->query != NULL || cfg->u.v != NULL);
+    if (cfg == &config && config_env_only) {
+        set_config_from_env(cfg);
+        return;
+    }
     /* for now we only support config files by short name: we'll see
      * whether we need to also support full paths
      */
@@ -647,6 +653,13 @@ get_config_val_other_arch(const char *var, char *val, size_t valsz, bool *app_sp
 {
     return get_config_val_other(NULL, 0, IF_X64_ELSE(CFG_SFX_32, CFG_SFX_64), var, val,
                                 valsz, app_specific, from_env, from_1config);
+}
+
+void
+d_r_config_set_env_only(void)
+{
+    ASSERT(!config_initialized);
+    config_env_only = true;
 }
 
 void
