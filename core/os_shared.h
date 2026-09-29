@@ -953,6 +953,11 @@ void
 mutex_wait_contended_lock(mutex_t *lock, priv_mcontext_t *mc);
 void
 mutex_notify_released_lock(mutex_t *lock);
+#ifdef LINUX
+bool
+os_futex_wait_at_safe_spot(dcontext_t *dcontext, volatile int *futex, int val,
+                           priv_mcontext_t *mc);
+#endif
 void
 mutex_free_contended_event(mutex_t *lock);
 /* contended path of rwlock operations */

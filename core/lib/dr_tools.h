@@ -946,6 +946,42 @@ DR_API
 bool
 dr_mark_safe_to_suspend(void *drcontext, bool enter);
 
+#ifdef LINUX
+DR_API
+/**
+ * Blocks the calling thread until the 32-bit value at \p futex is no longer equal
+ * to \p val, using the futex system call without FUTEX_PRIVATE_FLAG: the thread
+ * that changes the value and wakes this one with FUTEX_WAKE may be in another
+ * process that shares the memory.  Wakeups and interruptions that leave the
+ * value unchanged are waited out.
+ *
+ * While blocked, the thread is at a safe spot for DR with the application state
+ * \p mc, so operations that suspend all threads, such as dr_flush_region(),
+ * dr_suspend_all_other_threads(), code cache resets and the application's fork
+ * and exit_group system calls, do not wait for it to return.  \p mc must hold the
+ * thread's current application state, as obtained by dr_get_mcontext() with
+ * #DR_MC_ALL, with the pc at which the application will resume.
+ *
+ * This routine may be called from a clean call and from the pre-system-call,
+ * post-system-call and signal events.  The caller must not hold any locks.
+ * Because other threads may have flushed the code cache while this thread
+ * waited:
+ * - From a clean call, do not return normally: resume the application with
+ *   dr_redirect_execution() (e.g., at \p mc).
+ * - From the signal event, do not return #DR_SIGNAL_SUPPRESS: resume the
+ *   application with #DR_SIGNAL_REDIRECT, or deliver the signal.
+ * - The system call events may return normally.
+ *
+ * \return true once the value differs from \p val; false if the futex system call
+ * failed for another reason (e.g., \p futex is not a valid address).
+ *
+ * \note Linux only.
+ */
+bool
+dr_futex_wait_at_safe_spot(void *drcontext, volatile int *futex, int val,
+                           dr_mcontext_t *mc);
+#endif
+
 DR_API
 /**
  * Atomically adds \p val to \p *dest and returns the sum.
