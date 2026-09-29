@@ -309,6 +309,7 @@ Further non-compatibility-affecting changes include:
  - Added the -vm_reserve_strict option, which makes running out of DR's virtual
    memory reservations a fatal error instead of falling back to memory obtained from
    the operating system outside of the reservations.
+ - Fixed dr_flush_region() crashing when the region was never executed from.
 
 **************************************************
 <hr>
