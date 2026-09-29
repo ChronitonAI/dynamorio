@@ -2051,6 +2051,14 @@ relocate_dynamorio(byte *dr_map, size_t dr_size, byte *sp)
     /* We can't use PAGE_SIZE as that may require relocations to access. */
     const int min_page_size = 4096;
 
+    /* Initialize the page size first: relocating needs it and would otherwise find
+     * it by probing with temporary mappings.  This does not need relocations.
+     * For ptrace injection, sp points at an argument block instead of at the
+     * kernel's argc, argv, envp and auxv.
+     */
+    if ((ptr_int_t)argc != ARGC_PTRACE_SENTINEL)
+        os_page_size_init(env, true);
+
     if (dr_map == NULL) {
         /* We can't start with the address of relocate_dynamorio or something as that
          * may require relocations to access!
@@ -2068,8 +2076,6 @@ relocate_dynamorio(byte *dr_map, size_t dr_size, byte *sp)
     /* Relocate it */
     if (privload_get_os_privmod_data(dr_map, &opd))
         privload_early_relocate_os_privmod_data(&opd, dr_map);
-
-    os_page_size_init(env, true);
 }
 
 /* i#1227: on a conflict with the app we reload ourselves.
