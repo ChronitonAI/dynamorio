@@ -306,6 +306,9 @@ Further non-compatibility-affecting changes include:
  - Fixed -vm_allow_smaller, which never retried with a smaller size, and allowed
    decimal values (such as a plain "0") for address options like -vm_base and
    -vm_max_offset.
+ - Added the -vm_reserve_strict option, which makes running out of DR's virtual
+   memory reservations a fatal error instead of falling back to memory obtained from
+   the operating system outside of the reservations.
 
 **************************************************
 <hr>

@@ -1529,8 +1529,19 @@ reached_beyond_vmm(which_vmm_t which)
     if (INTERNAL_OPTION(rstats_to_stderr))
         dump_global_rstats_to_stderr();
     char message[256];
-    if (DYNAMO_OPTION(satisfy_w_xor_x) &&
-        (TESTANY(VMM_REACHABLE, which) || REACHABLE_HEAP())) {
+    if (DYNAMO_OPTION(vm_reserve_strict)) {
+        bool is_vmcode = vmheap_for_which(which) == &heapmgt->vmcode;
+        snprintf(message, BUFFER_SIZE_ELEMENTS(message),
+                 "Alloc type: 0x%x.  -vm_reserve_strict forbids allocating outside the "
+                 "%s reservation: try a larger '%s'",
+                 which, is_vmcode ? "vmcode" : "vmheap",
+                 is_vmcode ? "-vm_size" : "-vmheap_size");
+        NULL_TERMINATE_BUFFER(message);
+        REPORT_FATAL_ERROR_AND_EXIT(OUT_OF_VMM_CANNOT_USE_OS, 3, get_application_name(),
+                                    get_application_pid(), message);
+        ASSERT_NOT_REACHED();
+    } else if (DYNAMO_OPTION(satisfy_w_xor_x) &&
+               (TESTANY(VMM_REACHABLE, which) || REACHABLE_HEAP())) {
         /* We do not bother to try to mirror separate from-OS allocs: the user
          * should set -vm_size 2G instead and take the rip-rel mangling hit
          * (see i#3570).
@@ -1588,9 +1599,10 @@ vmm_heap_reserve(size_t size, heap_error_code_t *error_code, bool executable,
 
     if (DYNAMO_OPTION(vm_reserve)) {
         /* XXX: should we make this an external option? */
-        if (INTERNAL_OPTION(vm_use_last) ||
-            (DYNAMO_OPTION(switch_to_os_at_vmm_reset_limit) &&
-             at_reset_at_vmm_limit(vmh))) {
+        if (!DYNAMO_OPTION(vm_reserve_strict) &&
+            (INTERNAL_OPTION(vm_use_last) ||
+             (DYNAMO_OPTION(switch_to_os_at_vmm_reset_limit) &&
+              at_reset_at_vmm_limit(vmh)))) {
             DO_ONCE({
                 if (DYNAMO_OPTION(reset_at_switch_to_os_at_vmm_limit)) {
                     schedule_reset(RESET_ALL);
@@ -1668,7 +1680,9 @@ vmm_heap_reserve(size_t size, heap_error_code_t *error_code, bool executable,
         }
         DO_ONCE({
             DODEBUG({ out_of_vmheap_once = true; });
-            if (!INTERNAL_OPTION(skip_out_of_vm_reserve_curiosity)) {
+            if (!INTERNAL_OPTION(skip_out_of_vm_reserve_curiosity) &&
+                /* reached_beyond_vmm() below reports a fatal error instead. */
+                !DYNAMO_OPTION(vm_reserve_strict)) {
                 /* this maybe unsafe for early services w.r.t. case 666 */
                 SYSLOG_INTERNAL_WARNING(
                     "Out of %s reservation - reserving %dKB. "

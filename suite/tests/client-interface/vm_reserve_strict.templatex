@@ -1,0 +1,2 @@
+first allocation is inside the reservation
+<Application .*simple_app.* Out of contiguous memory. .* forbids allocating outside the vmcode reservation: try a larger '.*'>

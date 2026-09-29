@@ -1664,6 +1664,17 @@ OPTION_DEFAULT(bool, vm_allow_not_at_base, true,
 OPTION_DEFAULT(bool, vm_allow_smaller, true,
                "if we can't allocate vm heap of "
                "requested size, try smaller sizes instead of dying")
+/* For embedders who control the address space layout and need all of DR's heap and
+ * code memory to stay inside the reservations (e.g., a tool that places DR at a
+ * range the application never uses).  Requires -vm_reserve.  With it,
+ * -switch_to_os_at_vmm_reset_limit is ignored.  This only affects allocations once
+ * the reservations exist: combine with -no_vm_allow_not_at_base (and -vm_base,
+ * -vm_max_offset 0, -no_vm_base_near_app) to also pin down where the vmcode
+ * reservation itself is placed.
+ */
+OPTION_DEFAULT(bool, vm_reserve_strict, false,
+               "treat running out of the vm reservations as a fatal error instead of "
+               "falling back to allocations from the OS outside of the reservations")
 OPTION_DEFAULT(bool, vm_base_near_app, true,
                "allocate vm region near the app if possible (if not, if "
                "-vm_allow_not_at_base, will try elsewhere)")

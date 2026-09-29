@@ -1492,6 +1492,11 @@ check_option_compatibility_helper(int recurse_count)
         changed_options = true;
     }
 #    endif
+    if (DYNAMO_OPTION(vm_reserve_strict) && !DYNAMO_OPTION(vm_reserve)) {
+        USAGE_ERROR("-vm_reserve_strict requires -vm_reserve: enabling.");
+        dynamo_options.vm_reserve = true;
+        changed_options = true;
+    }
     if (RUNNING_WITHOUT_CODE_CACHE() && DYNAMO_OPTION(enable_reset)) {
         /* No reset for hotp_only and thin_client modes; case 8389. */
         USAGE_ERROR("-enable_reset can't be used with -hotp_only or -thin_client");
