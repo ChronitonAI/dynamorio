@@ -2870,6 +2870,8 @@ if (UNIX)
         "" "" "")
       target_include_directories(client.deliver_signal_frame PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/client-interface)
+      tobuild_ci(client.app_memory_changed client-interface/app_memory_changed.c
+        "" "" "")
     endif ()
   endif (NOT ARM)
   if (X86 OR AARCH64) # XXX i#1551: port asm to AArch32

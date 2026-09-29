@@ -10822,6 +10822,66 @@ os_futex_wait_at_safe_spot(dcontext_t *dcontext, volatile int *futex, int val,
 }
 #endif
 
+/* See dr_app_memory_changed(). */
+void
+os_app_memory_changed(dcontext_t *dcontext, app_pc start, size_t size, uint prot)
+{
+    enum { MAX_MAPS_PER_QUERY = 16 };
+    app_pc end = (app_pc)ALIGN_FORWARD(start + size, PAGE_SIZE);
+    app_pc pc = (app_pc)ALIGN_BACKWARD(start, PAGE_SIZE);
+    memquery_iter_t iter;
+    start = pc;
+    /* Throw away the code we built from the range and the range's executable status.
+     * We do not restore the page protections we changed there (to detect code
+     * modifications) but apply prot below.  Executing code in the range again
+     * re-establishes our view of it.
+     */
+    flush_fragments_in_region_start(dcontext, start, end - start,
+                                    false /*!own initexit lock*/, true /*free futures*/,
+                                    true /*exec invalid*/, false /*don't force synchall*/,
+                                    THREAD_SYNCH_NO_LOCKS_NO_XFER _IF_DGCDIAG(NULL));
+    forget_executable_region(start, end - start);
+    flush_fragments_in_region_finish(dcontext, false /*!keep initexit lock*/);
+    /* Give what is mapped in the range the new protection, and update our cache of
+     * the address space.  We collect a few mappings at a time, as changing their
+     * protection can change the maps file we are reading.
+     */
+    while (pc < end) {
+        app_pc map_start[MAX_MAPS_PER_QUERY], map_end[MAX_MAPS_PER_QUERY];
+        uint map_prot[MAX_MAPS_PER_QUERY];
+        int num_maps = 0, i;
+        memquery_iterator_start(&iter, pc, true /*may alloc*/);
+        while (num_maps < MAX_MAPS_PER_QUERY && memquery_iterator_next(&iter)) {
+            if (iter.vm_start >= end)
+                break;
+            if (iter.vm_end <= pc)
+                continue;
+            map_start[num_maps] = MAX(iter.vm_start, pc);
+            map_end[num_maps] = MIN(iter.vm_end, end);
+            map_prot[num_maps] = iter.prot;
+            num_maps++;
+        }
+        memquery_iterator_stop(&iter);
+        memcache_lock();
+        for (i = 0; i < num_maps; i++) {
+            if (pc < map_start[i])
+                memcache_remove(pc, map_start[i]);
+            if (map_prot[i] != prot)
+                os_set_protection(map_start[i], map_end[i] - map_start[i], prot);
+            /* A type of -1 keeps the types we know, e.g., of images. */
+            memcache_update(map_start[i], map_end[i], prot, -1);
+            pc = map_end[i];
+        }
+        if (num_maps < MAX_MAPS_PER_QUERY) {
+            /* The rest of the range is not mapped. */
+            if (pc < end)
+                memcache_remove(pc, end);
+            pc = end;
+        }
+        memcache_unlock();
+    }
+}
+
 void
 mutex_notify_released_lock(mutex_t *lock)
 {

@@ -334,6 +334,9 @@ Further non-compatibility-affecting changes include:
    the application's signal state as the kernel does upon delivery.
  - DynamoRIO no longer modifies the application's signal frame when the
    application returns from a signal handler on x86-64 Linux.
+ - Added dr_app_memory_changed(), which tells DynamoRIO that application memory
+   changed without it observing the change (e.g., written by another process),
+   along with the memory's new protection.
 
 **************************************************
 <hr>

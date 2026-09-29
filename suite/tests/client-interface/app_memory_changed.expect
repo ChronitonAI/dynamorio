@@ -1,0 +1,5 @@
+before the change: 2
+client: data page is read-only
+after the change: 2
+after writing the code: 3
+all done
