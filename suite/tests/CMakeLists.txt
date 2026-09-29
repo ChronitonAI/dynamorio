@@ -2527,6 +2527,12 @@ if (NOT MACOS AND NOT ANDROID)
   DynamoRIO_get_full_path(modules_libname client.modules.appdll "${location_suffix}")
   tobuild_ci(client.modules client-interface/modules.c "" "" "${modules_libname}")
 endif ()
+if (LINUX AND X64)
+  # The -vm_base and -vm_size values must match the constants in the client.
+  tobuild_ci(client.vm_reserve_strict client-interface/vm_reserve_strict.c ""
+    "-vm_reserve_strict -no_vm_base_near_app -vm_base 0x100000000 -vm_max_offset 0 -vm_size 32M"
+    "")
+endif ()
 if (X86) # XXX i#1551, i#1569: port to ARM and AArch64
   tobuild_ci(client.alloc client-interface/alloc.c ""
     # For the subtest "targeting upper 2GB of low 4GB" we move -vm_base out of the

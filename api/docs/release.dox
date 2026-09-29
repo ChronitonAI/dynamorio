@@ -303,6 +303,12 @@ Further non-compatibility-affecting changes include:
    by 8x. This also decreased the granularity of checking for the -trace_for_instrs
    and -exit_after_instrs flags; the old granularity can be reproduced by setting
    "-main_buf_records 4K".
+ - Fixed -vm_allow_smaller, which never retried with a smaller size, and allowed
+   decimal values (such as a plain "0") for address options like -vm_base and
+   -vm_max_offset.
+ - Added the -vm_reserve_strict option, which makes running out of DR's virtual
+   memory reservations a fatal error instead of falling back to memory obtained from
+   the operating system outside of the reservations.
 
 **************************************************
 <hr>
