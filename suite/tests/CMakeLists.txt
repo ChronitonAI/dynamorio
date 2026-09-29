@@ -2859,6 +2859,13 @@ if (UNIX)
         ${CMAKE_CURRENT_SOURCE_DIR}/client-interface)
       link_with_pthread(client.mangle_suspend)
     endif ()
+    if (LINUX AND X86 AND X64)
+      tobuild_ci(client.futex_wait_safe_spot client-interface/futex_wait_safe_spot.c
+        "" "" "")
+      target_include_directories(client.futex_wait_safe_spot PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/client-interface)
+      link_with_pthread(client.futex_wait_safe_spot)
+    endif ()
   endif (NOT ARM)
   if (X86 OR AARCH64) # XXX i#1551: port asm to AArch32
     tobuild_ci(client.syscall-mod client-interface/syscall-mod.c "" "" "")

@@ -10734,6 +10734,39 @@ mutex_wait_contended_lock(mutex_t *lock, priv_mcontext_t *mc)
     return;
 }
 
+#ifdef LINUX
+/* Waits until *futex != val while at a safe spot with the valid mcontext mc: see
+ * dr_futex_wait_at_safe_spot().  Uses a non-private futex so that the waker may
+ * be in another process.
+ */
+bool
+os_futex_wait_at_safe_spot(dcontext_t *dcontext, volatile int *futex, int val,
+                           priv_mcontext_t *mc)
+{
+    ptr_int_t res;
+    ASSERT(dcontext != NULL && dcontext == get_thread_private_dcontext());
+    ASSERT(ALIGNED(futex, sizeof(int)));
+    /* Other threads use this as our state while we wait: e.g., detach translates
+     * it into our native context.
+     */
+    *get_mcontext(dcontext) = *mc;
+    while (atomic_aligned_read_int(futex) == val) {
+        /* We are not transferable: our caller has a return point in DR or the
+         * cache.  Resets and flushes skip us, and detach sends us native.
+         */
+        set_synch_state(dcontext, THREAD_SYNCH_VALID_MCONTEXT_NO_XFER);
+        res = ksynch_wait(futex, val, 0);
+        set_synch_state(dcontext, THREAD_SYNCH_NONE);
+        /* A suspension by another thread interrupts the wait with -EINTR.  We
+         * re-check the value after any wakeup.
+         */
+        if (res != 0 && res != -EWOULDBLOCK && res != -EINTR)
+            return false;
+    }
+    return true;
+}
+#endif
+
 void
 mutex_notify_released_lock(mutex_t *lock)
 {

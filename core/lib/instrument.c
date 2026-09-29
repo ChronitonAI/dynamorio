@@ -3940,6 +3940,28 @@ dr_mark_safe_to_suspend(void *drcontext, bool enter)
     return true;
 }
 
+#ifdef LINUX
+DR_API
+bool
+dr_futex_wait_at_safe_spot(void *drcontext, volatile int *futex, int val,
+                           dr_mcontext_t *mc)
+{
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
+    CLIENT_ASSERT(!standalone_library, "API not supported in standalone mode");
+    CLIENT_ASSERT(dcontext != NULL && dcontext == get_thread_private_dcontext(),
+                  "drcontext must be that of the calling thread");
+    CLIENT_ASSERT(futex != NULL && ALIGNED(futex, sizeof(int)),
+                  "futex must be 4-byte-aligned");
+    CLIENT_ASSERT(mc != NULL && mc->size == sizeof(dr_mcontext_t) &&
+                      mc->flags == DR_MC_ALL,
+                  "mcontext must be for DR_MC_ALL");
+    CLIENT_ASSERT(OWN_NO_LOCKS(dcontext),
+                  "dr_futex_wait_at_safe_spot: caller must not hold any locks");
+    return os_futex_wait_at_safe_spot(dcontext, futex, val,
+                                      dr_mcontext_as_priv_mcontext(mc));
+}
+#endif
+
 DR_API
 int
 dr_atomic_add32_return_sum(volatile int *dest, int val)

@@ -320,6 +320,10 @@ Further non-compatibility-affecting changes include:
    that stays the ptracer of a process start DynamoRIO in it with a given options
    string (without configuration files), page size, initial register state and
    segment bases.
+ - Added dr_futex_wait_at_safe_spot() for Linux, which blocks the calling thread on
+   a futex (which may be shared with another process) at a point where other
+   threads' flushes and other operations that suspend all threads do not need to
+   wait for it.
 
 **************************************************
 <hr>

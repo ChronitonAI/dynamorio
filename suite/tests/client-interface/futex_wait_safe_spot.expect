@@ -1,0 +1,10 @@
+waiter: waiting in a clean call
+flush while waiting in a clean call: done
+waiter: resumed after the clean call wait, gate 1
+waiter: waiting in a system call event
+flush while waiting in a system call event: done
+waiter: resumed after the system call wait, gate 1
+waiter: waiting in a signal event
+flush while waiting in a signal event: done
+waiter: resumed after the signal wait, gate 1
+all done
