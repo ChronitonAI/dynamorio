@@ -305,6 +305,10 @@ Further non-compatibility-affecting changes include:
    "-main_buf_records 4K".
  - DynamoRIO no longer probes for the page size with temporary memory mappings at
    startup: it now finds the page size in the auxiliary vector.
+ - Fixed several issues with ptrace injection (drrun -use_ptrace and -attach):
+   the application's flags register is now preserved, the injectee no longer keeps
+   an open file descriptor for libdynamorio.so, and drrun -use_ptrace no longer
+   hangs after the application exits.
 
 **************************************************
 <hr>

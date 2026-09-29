@@ -797,19 +797,24 @@ dr_inject_wait_for_child(void *data, uint64 timeout_millis)
         struct timespec t;
         t.tv_sec = 1;
         t.tv_nsec = 0L;
+        info->exitcode = 0;
         do {
-            /* At this point dr_inject_process_run has called PTRACE_DETACH
-             * For non-child target, we should poll for its exit.
+            /* At this point dr_inject_process_run has called PTRACE_DETACH.
+             * If the target is our child (we created it), reap it: it stays a
+             * zombie until we do, and kill(pid, 0) keeps succeeding on a zombie.
+             * For a non-child target, we poll for its exit.
              * There is no standard way of getting non-child target process' exit code.
              */
-            if (kill(info->pid, 0) == -1) {
-                if (errno == ESRCH)
-                    exit = true;
-            }
+            pid_t res = waitpid(info->pid, &info->exitcode, WNOHANG);
+            if (res == info->pid)
+                exit = true;
+            else if (res == -1 && errno == ECHILD && kill(info->pid, 0) == -1 &&
+                     errno == ESRCH)
+                exit = true;
             /* sleep might not be implemented using nanosleep */
-            nanosleep(&t, 0);
+            if (!exit)
+                nanosleep(&t, 0);
         } while (!exit && !timeout_expired);
-        info->exitcode = 0;
         info->exited = (exit != false);
     }
     return info->exited;
@@ -1484,6 +1489,20 @@ injectee_open(dr_inject_info_t *info, const char *path, int flags, mode_t mode)
     return injectee_run_get_retval(info, dc, ilist);
 }
 
+/* Call sys_close in the child. */
+static int
+injectee_close(dr_inject_info_t *info, int fd)
+{
+    void *dc = GLOBAL_DCONTEXT;
+    instrlist_t *ilist = instrlist_create(dc);
+    opnd_t args[MAX_SYSCALL_ARGS];
+    int num_args = 0;
+    args[num_args++] = OPND_CREATE_INTPTR(fd);
+    ASSERT(num_args <= MAX_SYSCALL_ARGS);
+    gen_syscall(dc, ilist, SYS_close, num_args, args);
+    return injectee_run_get_retval(info, dc, ilist);
+}
+
 static void *
 injectee_mmap(dr_inject_info_t *info, void *addr, size_t sz, int prot, int flags, int fd,
               off_t offset)
@@ -1672,6 +1691,7 @@ user_regs_to_mc(priv_mcontext_t *mc, struct USER_REGS_TYPE *regs)
     mc->r13 = regs->r13;
     mc->r14 = regs->r14;
     mc->r15 = regs->r15;
+    mc->xflags = regs->eflags;
 #        else
     mc->eip = (app_pc)regs->eip;
     mc->eax = regs->eax;
@@ -1682,6 +1702,7 @@ user_regs_to_mc(priv_mcontext_t *mc, struct USER_REGS_TYPE *regs)
     mc->ebp = regs->ebp;
     mc->esi = regs->esi;
     mc->edi = regs->edi;
+    mc->xflags = regs->eflags;
 #        endif
 #    elif defined(ARM)
     mc->r0 = regs->uregs[0];
@@ -1948,6 +1969,8 @@ inject_ptrace(dr_inject_info_t *info, const char *library_path)
         &loader, true /*fixed*/, injectee_map_file, injectee_unmap, injectee_prot, NULL,
         injectee_memset, MODLOAD_SEPARATE_PROCESS /*!reachable*/,
         injectee_overlap_map_file);
+    /* The mappings keep the file alive: do not leak the descriptor to the app. */
+    injectee_close(info, dr_fd);
     if (injected_base == NULL) {
         if (verbose)
             fprintf(stderr, "Unable to mmap libdynamorio.so in injectee\n");
