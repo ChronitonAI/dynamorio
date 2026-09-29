@@ -2249,13 +2249,14 @@ os_handle_mov_seg(dcontext_t *dcontext, byte *pc)
     ushort sel = 0;
     our_modify_ldt_t *desc;
     int desc_idx;
+    void *base;
     os_local_state_t *os_tls;
     os_thread_data_t *ostd;
 
     instr_init(dcontext, &instr);
     decode_cti(dcontext, pc, &instr);
-    /* the first instr must be mov seg */
-    ASSERT(instr_get_opcode(&instr) == OP_mov_seg);
+    /* the first instr must be mov seg or a pop of fs or gs */
+    ASSERT(instr_get_opcode(&instr) == OP_mov_seg || instr_get_opcode(&instr) == OP_pop);
     opnd = instr_get_dst(&instr, 0);
     ASSERT(opnd_is_reg(opnd));
     seg = opnd_get_reg(opnd);
@@ -2266,26 +2267,38 @@ os_handle_mov_seg(dcontext_t *dcontext, byte *pc)
     os_tls = get_os_tls();
 
     /* get the selector value */
-    opnd = instr_get_src(&instr, 0);
-    if (opnd_is_reg(opnd)) {
-        sel = (ushort)reg_get_value_priv(opnd_get_reg(opnd), get_mcontext(dcontext));
-    } else {
-        void *ptr;
-        ptr = (ushort *)opnd_compute_address_priv(opnd, get_mcontext(dcontext));
-        ASSERT(ptr != NULL);
-        if (!d_r_safe_read(ptr, sizeof(sel), &sel)) {
+    if (instr_get_opcode(&instr) == OP_pop) {
+        /* the selector is at the top of the stack */
+        if (!d_r_safe_read((void *)get_mcontext(dcontext)->xsp, sizeof(sel), &sel)) {
             /* XXX: if invalid address, should deliver a signal to user. */
             ASSERT_NOT_IMPLEMENTED(false);
+        }
+    } else {
+        opnd = instr_get_src(&instr, 0);
+        if (opnd_is_reg(opnd)) {
+            sel = (ushort)reg_get_value_priv(opnd_get_reg(opnd), get_mcontext(dcontext));
+        } else {
+            void *ptr;
+            ptr = (ushort *)opnd_compute_address_priv(opnd, get_mcontext(dcontext));
+            ASSERT(ptr != NULL);
+            if (!d_r_safe_read(ptr, sizeof(sel), &sel)) {
+                /* XXX: if invalid address, should deliver a signal to user. */
+                ASSERT_NOT_IMPLEMENTED(false);
+            }
         }
     }
     /* calculate the entry_number */
     desc_idx = SELECTOR_INDEX(sel) - tls_min_index();
+    /* Other selectors, like the null selector on most processors, give base 0. */
+    base = (desc_idx >= 0 && desc_idx < GDT_NUM_TLS_SLOTS)
+        ? (void *)(ptr_uint_t)desc[desc_idx].base_addr
+        : NULL;
     if (seg == TLS_REG_LIB) {
         os_tls->app_lib_tls_reg = sel;
-        os_tls->app_lib_tls_base = (void *)(ptr_uint_t)desc[desc_idx].base_addr;
+        os_tls->app_lib_tls_base = base;
     } else {
         os_tls->app_alt_tls_reg = sel;
-        os_tls->app_alt_tls_base = (void *)(ptr_uint_t)desc[desc_idx].base_addr;
+        os_tls->app_alt_tls_base = base;
     }
     instr_free(dcontext, &instr);
     LOG(THREAD_GET, LOG_THREADS, 2,

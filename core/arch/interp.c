@@ -1603,16 +1603,21 @@ bb_process_mov_seg(dcontext_t *dcontext, build_bb_t *bb)
     if (!INTERNAL_OPTION(mangle_app_seg))
         return true; /* continue bb */
 
-    /* if it is a read, we only need mangle the instruction. */
-    ASSERT(instr_num_srcs(bb->instr) == 1);
-    if (opnd_is_reg(instr_get_src(bb->instr, 0)) &&
-        reg_is_segment(opnd_get_reg(instr_get_src(bb->instr, 0))))
-        return true; /* continue bb */
+    if (instr_get_opcode(bb->instr) == OP_pop) {
+        /* a pop of fs or gs is an update */
+        seg = instr_push_pop_seg(bb->instr);
+    } else {
+        /* if it is a read, we only need mangle the instruction. */
+        ASSERT(instr_num_srcs(bb->instr) == 1);
+        if (opnd_is_reg(instr_get_src(bb->instr, 0)) &&
+            reg_is_segment(opnd_get_reg(instr_get_src(bb->instr, 0))))
+            return true; /* continue bb */
 
-    /* it is an update, we need set to be the first instr of bb */
-    ASSERT(instr_num_dsts(bb->instr) == 1);
-    ASSERT(opnd_is_reg(instr_get_dst(bb->instr, 0)));
-    seg = opnd_get_reg(instr_get_dst(bb->instr, 0));
+        /* it is an update, we need set to be the first instr of bb */
+        ASSERT(instr_num_dsts(bb->instr) == 1);
+        ASSERT(opnd_is_reg(instr_get_dst(bb->instr, 0)));
+        seg = opnd_get_reg(instr_get_dst(bb->instr, 0));
+    }
     ASSERT(reg_is_segment(seg));
     /* we only need handle fs/gs */
     if (seg != SEG_GS && seg != SEG_FS)
@@ -3931,7 +3936,10 @@ build_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
         }
 #endif
 #if defined(UNIX) && !defined(DGC_DIAGNOSTICS) && defined(X86)
-        else if (instr_get_opcode(bb->instr) == OP_mov_seg) {
+        else if (instr_get_opcode(bb->instr) == OP_mov_seg ||
+                 (INTERNAL_OPTION(mangle_app_seg) &&
+                  instr_get_opcode(bb->instr) == OP_pop &&
+                  instr_push_pop_seg(bb->instr) != REG_NULL)) {
             if (!bb_process_mov_seg(dcontext, bb))
                 break;
         }
