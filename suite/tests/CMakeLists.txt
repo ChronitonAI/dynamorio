@@ -6109,6 +6109,20 @@ if (UNIX)
       "${drconfig_path}@-quiet@-unreg@linux.execve-config")
     # Can't run in parallel w/ blocklist since manipulating same config file:
     set(linux.child-allowlist_depends linux.child-blocklist)
+
+    # With -no_follow_systemwide as well, the child's configuration is ignored and
+    # the execve is left alone.
+    set(linux.child-allowlist-nosystemwide_expectbase "child-blocklist")
+    torunonly(linux.child-allowlist-nosystemwide linux.execv linux/execv.c
+      "-no_follow_children -no_follow_systemwide" "${execve-config-path}")
+    set(linux.child-allowlist-nosystemwide_runcmp
+      "${CMAKE_CURRENT_SOURCE_DIR}/runmulti.cmake")
+    set(linux.child-allowlist-nosystemwide_precmd
+      "${drconfig_path}@-quiet@-reg@linux.execve-config${debug_args}@-ops@-stderr_mask@@0")
+    set(linux.child-allowlist-nosystemwide_postcmd
+      "${drconfig_path}@-quiet@-unreg@linux.execve-config")
+    # Can't run in parallel w/ the others since manipulating same config file:
+    set(linux.child-allowlist-nosystemwide_depends linux.child-allowlist)
   endif ()
 
   tobuild(linux.execve-rec linux/execve-rec.c)

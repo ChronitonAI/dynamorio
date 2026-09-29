@@ -337,6 +337,9 @@ Further non-compatibility-affecting changes include:
  - Added dr_app_memory_changed(), which tells DynamoRIO that application memory
    changed without it observing the change (e.g., written by another process),
    along with the memory's new protection.
+ - On Linux, -no_follow_systemwide now keeps a child's configuration from turning on
+   following it across execve when -no_follow_children is set, so that the two
+   options together leave execve untouched.
 
 **************************************************
 <hr>

@@ -6582,7 +6582,12 @@ handle_execve(dcontext_t *dcontext)
         IF_X64_ELSE(x64, !x64) ? dynamorio_library_path : dynamorio_alt_arch_path;
 
     should_inject = DYNAMO_OPTION(follow_children);
-    if (get_config_val_other_app(get_short_name(fname), get_process_id(),
+    /* The child's configuration can turn off following it and, with
+     * -follow_systemwide, turn it on.  With -no_follow_children and
+     * -no_follow_systemwide we leave the execve alone.
+     */
+    if ((DYNAMO_OPTION(follow_children) || DYNAMO_OPTION(follow_systemwide)) &&
+        get_config_val_other_app(get_short_name(fname), get_process_id(),
                                  x64 ? DR_PLATFORM_64BIT : DR_PLATFORM_32BIT,
                                  DYNAMORIO_VAR_RUNUNDER, rununder_buf,
                                  BUFFER_SIZE_ELEMENTS(rununder_buf), &app_specific,
