@@ -2026,6 +2026,44 @@ DR_API
 void *
 dr_get_dr_segment_base(DR_PARAM_IN reg_id_t tls_register);
 
+#if defined(LINUX) && defined(X86) && defined(X64)
+DR_API
+/**
+ * Returns the application's base of segment \p seg, which must be #DR_SEG_FS or
+ * #DR_SEG_GS, for the thread of \p drcontext.  DR uses these segment registers
+ * itself and keeps the application's bases separately (see
+ * dr_get_dr_segment_base() for DR's): this is the value the application observes,
+ * e.g., with the arch_prctl system call or the rdfsbase and rdgsbase instructions.
+ *
+ * Returns NULL if DR does not keep the application's base of \p seg, i.e., with
+ * -no_mangle_app_seg, or for #DR_SEG_FS with -no_private_loader (the application
+ * then owns the fs register).
+ *
+ * \note Linux x86-64 only.
+ */
+void *
+dr_get_app_segment_base(void *drcontext, reg_id_t seg);
+
+DR_API
+/**
+ * Sets the application's base of segment \p seg, which must be #DR_SEG_FS or
+ * #DR_SEG_GS, for the thread of \p drcontext to \p base, as seen by all subsequent
+ * application accesses through that segment and by the application's queries of the
+ * base (see dr_get_app_segment_base()).  This is like the application setting the
+ * base with the wrfsbase or wrgsbase instruction: the segment selector does not
+ * change, and \p base is not checked for validity.  \p drcontext must be the
+ * calling thread's or that of a thread that is suspended (e.g., with
+ * dr_suspend_all_other_threads()).
+ *
+ * Returns false if DR does not keep the application's base of \p seg (see
+ * dr_get_app_segment_base()).
+ *
+ * \note Linux x86-64 only.
+ */
+bool
+dr_set_app_segment_base(void *drcontext, reg_id_t seg, void *base);
+#endif
+
 DR_API
 /**
  * Allocates \p num_slots contiguous thread-local storage (TLS) slots that

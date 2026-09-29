@@ -2089,7 +2089,6 @@ get_os_tls_from_dc(dcontext_t *dcontext)
     return (os_local_state_t *)(local_state - offsetof(os_local_state_t, state));
 }
 
-#if defined(AARCHXX) || defined(RISCV64)
 bool
 os_set_app_tls_base(dcontext_t *dcontext, reg_id_t reg, void *base)
 {
@@ -2113,7 +2112,6 @@ os_set_app_tls_base(dcontext_t *dcontext, reg_id_t reg, void *base)
     ASSERT_NOT_REACHED();
     return false;
 }
-#endif
 
 #if defined(MACOS) && defined(AARCH64)
 /* On macOS a64 some synchronization primitives will fail if the thread
