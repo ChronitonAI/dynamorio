@@ -40,6 +40,13 @@
 
 #include "dr_config.h" /* for dr_platform_t */
 
+/* Makes d_r_config_init() take this process's configuration from the environment
+ * only, without reading any configuration file.  Must be called before
+ * d_r_config_init().
+ */
+void
+d_r_config_set_env_only(void);
+
 void
 d_r_config_init(void);
 

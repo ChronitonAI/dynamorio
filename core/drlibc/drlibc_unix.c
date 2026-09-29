@@ -565,7 +565,7 @@ os_find_page_size(void)
     return 4096;
 }
 
-static void
+void
 os_set_page_size(size_t size)
 {
     page_size = size; /* atomic write */
