@@ -959,6 +959,50 @@ is_sigqueue_supported(void)
 }
 
 /* os-specific initializations */
+#if defined(LINUX) && defined(X86) && defined(X64)
+#    ifndef AT_HWCAP2
+#        define AT_HWCAP2 26
+#    endif
+#    ifndef HWCAP2_FSGSBASE
+#        define HWCAP2_FSGSBASE (1 << 1)
+#    endif
+/* Whether the kernel lets applications use rdfsbase, wrfsbase, rdgsbase and
+ * wrgsbase.  Written only at init time.
+ */
+static bool app_fsgsbase_enabled;
+
+static void
+app_fsgsbase_init(void)
+{
+    ELF_AUXV_TYPE auxv;
+    file_t f;
+    if (!proc_has_feature(FEATURE_FSGSBASE))
+        return;
+    /* The kernel reports whether it enabled the instructions for user mode with
+     * HWCAP2_FSGSBASE.  We read the auxiliary vector from /proc as we do not have
+     * a pointer to it with every injection method.
+     */
+    f = os_open("/proc/self/auxv", OS_OPEN_READ);
+    if (f == INVALID_FILE)
+        return;
+    while (os_read(f, &auxv, sizeof(auxv)) == sizeof(auxv) && auxv.a_type != AT_NULL) {
+        if (auxv.a_type == AT_HWCAP2) {
+            app_fsgsbase_enabled = TESTANY(HWCAP2_FSGSBASE, auxv.a_un.a_val);
+            break;
+        }
+    }
+    os_close(f);
+    LOG(GLOBAL, LOG_TOP, 1, "application use of fsgsbase instructions is %s\n",
+        app_fsgsbase_enabled ? "enabled" : "disabled");
+}
+
+bool
+os_app_fsgsbase_enabled(void)
+{
+    return app_fsgsbase_enabled;
+}
+#endif
+
 void
 d_r_os_init(void)
 {
@@ -1005,6 +1049,9 @@ d_r_os_init(void)
     if (!standalone_library)
         check_proc_mounted();
     detect_unsupported_syscalls();
+#endif
+#if defined(LINUX) && defined(X86) && defined(X64)
+    app_fsgsbase_init();
 #endif
 
     /* The signal we use to suspend threads.

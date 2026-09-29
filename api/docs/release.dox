@@ -304,6 +304,8 @@ Further non-compatibility-affecting changes include:
    and -exit_after_instrs flags; the old granularity can be reproduced by setting
    "-main_buf_records 4K".
  - Fixed the application's arch_prctl(ARCH_SET_GS) crashing DynamoRIO on x86-64.
+ - The application's rdfsbase, wrfsbase, rdgsbase and wrgsbase instructions now
+   read and write the application's segment bases instead of DynamoRIO's.
 
 **************************************************
 <hr>

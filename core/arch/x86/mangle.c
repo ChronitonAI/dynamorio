@@ -2935,6 +2935,66 @@ mangle_mov_seg(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
     }
 }
 
+#    if defined(LINUX) && defined(X64)
+/* mangle the application's rdfsbase, rdgsbase, wrfsbase and wrgsbase.  The segment
+ * registers hold DR's bases, while the application's bases are in our TLS (as for
+ * the arch_prctl system call), so we turn these into loads from and stores to our
+ * TLS slots.
+ */
+void
+mangle_fsgsbase(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
+                instr_t *next_instr)
+{
+    int opc = instr_get_opcode(instr);
+    bool is_read = (opc == OP_rdfsbase || opc == OP_rdgsbase);
+    reg_id_t seg = (opc == OP_rdfsbase || opc == OP_wrfsbase) ? SEG_FS : SEG_GS;
+    opnd_t reg_opnd, base_opnd;
+    ushort offs;
+    bool is_32;
+    app_pc xl8;
+
+    ASSERT(is_read || opc == OP_wrfsbase || opc == OP_wrgsbase);
+    /* Without the kernel's support, these raise SIGILL, as they will in the cache. */
+    if (!os_app_fsgsbase_enabled())
+        return;
+    if (seg == LIB_SEG_TLS && !INTERNAL_OPTION(private_loader))
+        return;
+    STATS_INC(app_fsgsbase_mangled);
+    reg_opnd = is_read ? instr_get_dst(instr, 0) : instr_get_src(instr, 0);
+    ASSERT(opnd_is_reg(reg_opnd));
+    is_32 = reg_is_32bit(opnd_get_reg(reg_opnd));
+    offs = os_tls_offset(os_get_app_tls_base_offset(seg));
+    /* The 32-bit forms read the low half of the base, zero-extending it into the
+     * full register just like a 32-bit load does.
+     */
+    base_opnd = opnd_create_sized_tls_slot(offs, is_32 ? OPSZ_4 : OPSZ_8);
+    /* We must change the original instr, which the caller might use, like
+     * mangle_mov_seg() does.
+     */
+    xl8 = get_app_instr_xl8(instr);
+    instr_reuse(dcontext, instr);
+    instr_set_opcode(instr, is_read ? OP_mov_ld : OP_mov_st);
+    instr_set_num_opnds(dcontext, instr, 1, 1);
+    instr_set_translation(instr, xl8);
+    if (is_read) {
+        /* mov %gs:off => reg */
+        instr_set_dst(instr, 0, reg_opnd);
+        instr_set_src(instr, 0, base_opnd);
+    } else {
+        /* mov reg => %gs:off */
+        instr_set_dst(instr, 0, base_opnd);
+        instr_set_src(instr, 0, reg_opnd);
+        if (is_32) {
+            /* The 32-bit forms clear the upper half of the base. */
+            POST(ilist, instr,
+                 INSTR_CREATE_mov_st(dcontext,
+                                     opnd_create_sized_tls_slot(offs + 4, OPSZ_4),
+                                     OPND_CREATE_INT32(0)));
+        }
+    }
+}
+#    endif
+
 /* mangle the instruction that reference memory via segment register */
 void
 mangle_seg_ref(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,

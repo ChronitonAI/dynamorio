@@ -31,7 +31,8 @@
  */
 
 /* Tests the application's access to its fs and gs segment bases, which DR
- * virtualizes on x86-64 as it uses these registers itself.
+ * virtualizes on x86-64 as it uses these registers itself: with the arch_prctl
+ * system call and with the rdfsbase, wrfsbase, rdgsbase and wrgsbase instructions.
  */
 
 #include "tools.h"
@@ -39,8 +40,13 @@
 #include <asm/prctl.h>
 #include <errno.h>
 #include <stdint.h>
+#include <sys/auxv.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+
+#ifndef HWCAP2_FSGSBASE
+#    define HWCAP2_FSGSBASE (1 << 1)
+#endif
 
 static uint64_t gs_data[2] = { 0x1122334455667788ULL, 0x0123456789abcdefULL };
 
@@ -80,10 +86,93 @@ test_arch_prctl(void)
         print("arch_prctl(ARCH_SET_GS) failed\n");
 }
 
+static uint64_t
+rdfsbase(void)
+{
+    uint64_t base;
+    __asm__ __volatile__("rdfsbase %0" : "=r"(base));
+    return base;
+}
+
+static uint64_t
+rdgsbase(void)
+{
+    uint64_t base;
+    __asm__ __volatile__("rdgsbase %0" : "=r"(base));
+    return base;
+}
+
+static uint32_t
+rdgsbase32(void)
+{
+    uint32_t base;
+    __asm__ __volatile__("rdgsbase %0" : "=r"(base));
+    return base;
+}
+
+static void
+wrfsbase(uint64_t base)
+{
+    __asm__ __volatile__("wrfsbase %0" : : "r"(base) : "memory");
+}
+
+static void
+wrgsbase(uint64_t base)
+{
+    __asm__ __volatile__("wrgsbase %0" : : "r"(base) : "memory");
+}
+
+static void
+wrgsbase32(uint32_t base)
+{
+    __asm__ __volatile__("wrgsbase %0" : : "r"(base) : "memory");
+}
+
+static void
+test_fsgsbase(void)
+{
+    uint64_t fs_base, orig_gs;
+    if ((getauxval(AT_HWCAP2) & HWCAP2_FSGSBASE) == 0) {
+        /* The instructions are not available: we print the same output. */
+        print("fs base ok\ngs base ok\n32-bit forms ok\n");
+        return;
+    }
+
+    /* The fs base is libc's TLS. */
+    fs_base = rdfsbase();
+    if (fs_base != arch_get(ARCH_GET_FS) || fs_base == 0)
+        print("rdfsbase mismatch\n");
+    /* Write it back: the application must keep working. */
+    wrfsbase(fs_base);
+    if (rdfsbase() == fs_base && arch_get(ARCH_GET_FS) == fs_base)
+        print("fs base ok\n");
+
+    orig_gs = rdgsbase();
+    if (orig_gs != arch_get(ARCH_GET_GS))
+        print("rdgsbase mismatch\n");
+    wrgsbase((uint64_t)gs_data);
+    /* The system call, memory references and rdgsbase all see the new base. */
+    if (arch_get(ARCH_GET_GS) == (uint64_t)gs_data && read_gs(0) == gs_data[0] &&
+        rdgsbase() == (uint64_t)gs_data)
+        print("gs base ok\n");
+
+    /* The 32-bit forms: rdgsbase reads the low half, and wrgsbase clears the upper
+     * half of the base.
+     */
+    wrgsbase(0x00007def12345678ULL);
+    if (rdgsbase32() == 0x12345678) {
+        wrgsbase32(0x87654321);
+        if (rdgsbase() == 0x87654321)
+            print("32-bit forms ok\n");
+    }
+    wrgsbase(orig_gs);
+}
+
 int
 main(int argc, char **argv)
 {
     test_arch_prctl();
+    test_fsgsbase();
     print("all done\n");
     return 0;
 }
