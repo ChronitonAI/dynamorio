@@ -1469,6 +1469,40 @@ DR_API
  */
 bool dr_unregister_signal_event(dr_signal_action_t (*func)(void *drcontext,
                                                            dr_siginfo_t *siginfo));
+
+DR_API
+/**
+ * Enters the application's handler for signal \p sig through a signal frame
+ * that the caller has already written to application memory, laid out as the
+ * kernel lays out the frames it delivers.  This is for clients that deliver
+ * signals themselves: e.g., to reproduce a delivery observed elsewhere with its
+ * exact frame.  DR does not build a frame; it updates its emulation of the
+ * application's signal state as the kernel does upon delivery:
+ * - it adds the handler's \p sa_mask and, unless the handler has SA_NODEFER,
+ *   \p sig itself to the application's blocked signals;
+ * - if the handler has SA_RESETHAND, it resets the handler to SIG_DFL;
+ * - if \p mcontext's stack pointer is on the application's alternate signal stack
+ *   and that stack has SS_AUTODISARM, it disables the alternate stack.
+ * When the handler returns through the frame with rt_sigreturn, DR restores the
+ * signal mask and the alternate signal stack from the frame, as it does for
+ * frames it builds itself.
+ *
+ * \p mcontext is the state at which the handler starts: its pc is the handler,
+ * its stack pointer points to the frame (to the return address that the kernel
+ * places at the start of the frame), and its argument registers hold what the
+ * kernel passes.  Its flags field must contain DR_MC_ALL.
+ *
+ * This routine may be called from a clean call, where it passes NULL for \p
+ * siginfo and, if successful, does not return, like dr_redirect_execution().
+ * It may also be called from a signal event callback, passing the event's \p
+ * siginfo: it then sets \p siginfo->mcontext to \p mcontext, and the callback
+ * must return #DR_SIGNAL_REDIRECT.
+ *
+ * \return false if \p sig is invalid.
+ */
+bool
+dr_deliver_signal_frame(void *drcontext, int sig, dr_mcontext_t *mcontext,
+                        dr_siginfo_t *siginfo);
 #endif /* UNIX */
 
 DR_API

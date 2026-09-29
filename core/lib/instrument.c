@@ -6907,17 +6907,13 @@ dr_set_mcontext(void *drcontext, dr_mcontext_t *context)
     return true;
 }
 
-DR_API
-bool
-dr_redirect_execution(dr_mcontext_t *mcontext)
+/* Transfers control to mcontext from a clean call or the exception event, reporting
+ * the transfer to kernel_xfer events as xfer_type (with sig for signals).
+ */
+static bool
+redirect_execution(dcontext_t *dcontext, dr_mcontext_t *mcontext,
+                   dr_kernel_xfer_type_t xfer_type, int sig)
 {
-    dcontext_t *dcontext = get_thread_private_dcontext();
-    CLIENT_ASSERT(!standalone_library, "API not supported in standalone mode");
-    ASSERT(dcontext != NULL);
-    CLIENT_ASSERT(mcontext->size == sizeof(dr_mcontext_t),
-                  "dr_mcontext_t.size field not set properly");
-    CLIENT_ASSERT(mcontext->flags == DR_MC_ALL, "dr_mcontext_t.flags must be DR_MC_ALL");
-
     /* PR 352429: squash current trace.
      * XXX: will clients use this so much that this will be a perf issue?
      * samples/cbr doesn't hit this even at -trace_threshold 1
@@ -6940,9 +6936,9 @@ dr_redirect_execution(dr_mcontext_t *mcontext)
         src_dmc.size = sizeof(src_dmc);
         src_dmc.flags = DR_MC_CONTROL | DR_MC_INTEGER;
         dr_get_mcontext(dcontext, &src_dmc);
-        if (instrument_kernel_xfer(dcontext, DR_XFER_CLIENT_REDIRECT, osc_empty, &src_dmc,
-                                   NULL, dcontext->next_tag, mcontext->xsp, osc_empty,
-                                   dr_mcontext_as_priv_mcontext(mcontext), 0))
+        if (instrument_kernel_xfer(dcontext, xfer_type, osc_empty, &src_dmc, NULL,
+                                   dcontext->next_tag, mcontext->xsp, osc_empty,
+                                   dr_mcontext_as_priv_mcontext(mcontext), sig))
             dcontext->next_tag = canonicalize_pc_target(dcontext, mcontext->pc);
     }
 #endif
@@ -6951,6 +6947,46 @@ dr_redirect_execution(dr_mcontext_t *mcontext)
     /* on success we won't get here */
     return false;
 }
+
+DR_API
+bool
+dr_redirect_execution(dr_mcontext_t *mcontext)
+{
+    dcontext_t *dcontext = get_thread_private_dcontext();
+    CLIENT_ASSERT(!standalone_library, "API not supported in standalone mode");
+    ASSERT(dcontext != NULL);
+    CLIENT_ASSERT(mcontext->size == sizeof(dr_mcontext_t),
+                  "dr_mcontext_t.size field not set properly");
+    CLIENT_ASSERT(mcontext->flags == DR_MC_ALL, "dr_mcontext_t.flags must be DR_MC_ALL");
+    return redirect_execution(dcontext, mcontext, DR_XFER_CLIENT_REDIRECT, 0);
+}
+
+#ifdef UNIX
+DR_API
+bool
+dr_deliver_signal_frame(void *drcontext, int sig, dr_mcontext_t *mcontext,
+                        dr_siginfo_t *siginfo)
+{
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
+    CLIENT_ASSERT(!standalone_library, "API not supported in standalone mode");
+    CLIENT_ASSERT(dcontext != NULL && dcontext == get_thread_private_dcontext(),
+                  "drcontext must be that of the calling thread");
+    CLIENT_ASSERT(mcontext->size == sizeof(dr_mcontext_t),
+                  "dr_mcontext_t.size field not set properly");
+    CLIENT_ASSERT(mcontext->flags == DR_MC_ALL, "dr_mcontext_t.flags must be DR_MC_ALL");
+    if (!os_deliver_signal_frame(dcontext, sig, mcontext->xsp))
+        return false;
+    if (siginfo != NULL) {
+        /* From the signal event: it resumes at siginfo->mcontext when it returns
+         * DR_SIGNAL_REDIRECT.
+         */
+        CLIENT_ASSERT(siginfo->mcontext != NULL, "invalid dr_siginfo_t");
+        *siginfo->mcontext = *mcontext;
+        return true;
+    }
+    return redirect_execution(dcontext, mcontext, DR_XFER_SIGNAL_DELIVERY, sig);
+}
+#endif
 
 DR_API
 byte *

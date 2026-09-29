@@ -528,6 +528,10 @@ typedef struct _thread_sig_info_t {
      */
     byte *xstate_buf;   /* xstate_alloc aligned */
     byte *xstate_alloc; /* unaligned */
+#    ifdef X64
+    /* Where handle_sigreturn() copies the application's frame (lazily allocated). */
+    byte *sigreturn_frame_alloc;
+#    endif
 #endif
 
 #ifdef RETURN_AFTER_CALL

@@ -241,6 +241,8 @@ void
 os_wait_thread_detached(dcontext_t *dcontext);
 void
 os_signal_thread_detach(dcontext_t *dcontext);
+bool
+os_deliver_signal_frame(dcontext_t *dcontext, int sig, reg_t handler_xsp);
 void
 os_tls_pre_init(int gdt_index);
 ushort

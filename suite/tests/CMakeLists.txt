@@ -2866,6 +2866,10 @@ if (UNIX)
         ${CMAKE_CURRENT_SOURCE_DIR}/client-interface)
       link_with_pthread(client.futex_wait_safe_spot)
       tobuild_ci(client.app_segment_base client-interface/app_segment_base.c "" "" "")
+      tobuild_ci(client.deliver_signal_frame client-interface/deliver_signal_frame.c
+        "" "" "")
+      target_include_directories(client.deliver_signal_frame PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/client-interface)
     endif ()
   endif (NOT ARM)
   if (X86 OR AARCH64) # XXX i#1551: port asm to AArch32
