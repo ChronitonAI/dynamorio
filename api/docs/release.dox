@@ -306,6 +306,8 @@ Further non-compatibility-affecting changes include:
  - Added dr_deliver_signal_frame(), which enters an application signal handler
    through a signal frame that the client wrote itself, updating DR's emulation of
    the application's signal state as the kernel does upon delivery.
+ - DynamoRIO no longer modifies the application's signal frame when the
+   application returns from a signal handler on x86-64 Linux.
 
 **************************************************
 <hr>

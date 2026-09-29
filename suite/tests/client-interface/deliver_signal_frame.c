@@ -59,6 +59,11 @@
 
 static char *alt_stack;
 
+/* The part of the frame that sigreturn reads: the kernel's struct ucontext. */
+#define KERNEL_UCONTEXT_SIZE (8 + 8 + sizeof(stack_t) + 256 + 8)
+static char frame_copy[KERNEL_UCONTEXT_SIZE];
+static void *frame_ucxt;
+
 static void
 handler(int sig, siginfo_t *info, void *ucxt)
 {
@@ -75,6 +80,9 @@ handler(int sig, siginfo_t *info, void *ucxt)
               sig, info->si_code, sigismember(&cur, SIGUSR1), sigismember(&cur, SIGUSR2),
               act.sa_handler == SIG_DFL);
     } else {
+        /* Remember the frame, which is left alone on the alternate stack. */
+        frame_ucxt = ucxt;
+        memcpy(frame_copy, ucxt, sizeof(frame_copy));
         print("handler: signal %d, blocked self %d, on alternate stack %d, alternate "
               "stack disabled %d\n",
               sig, sigismember(&cur, sig),
@@ -142,9 +150,11 @@ main(int argc, char **argv)
     MARKER(MARKER_DELIVER_AT_SIGILL, &req);
     __asm__ __volatile__("ud2");
     sigaltstack(NULL, &ss);
-    print("after handler: alternate stack enabled %d, values %s\n",
+    print("after handler: alternate stack enabled %d, values %s, frame %s\n",
           (ss.ss_flags & SS_DISABLE) == 0 && ss.ss_sp == alt_stack,
-          a + b == 3 ? "ok" : "corrupted");
+          a + b == 3 ? "ok" : "corrupted",
+          memcmp(frame_ucxt, frame_copy, sizeof(frame_copy)) == 0 ? "unchanged"
+                                                                  : "changed");
     print("all done\n");
     return 0;
 }

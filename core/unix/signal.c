@@ -1472,6 +1472,25 @@ sigsegv_handler_is_ours(void)
 }
 #endif /* DEBUG */
 
+#if defined(LINUX) && defined(X86) && defined(X64)
+/* The largest frame (from its start to the end of its xstate) that we copy in
+ * handle_sigreturn().  The kernel places the xstate right above the frame, after
+ * alignment padding.
+ */
+static size_t
+sigreturn_frame_max_size(void)
+{
+    return sizeof(sigframe_rt_t) + AVX_ALIGNMENT + signal_frame_extra_size(false);
+}
+
+static size_t
+sigreturn_frame_alloc_size(void)
+{
+    /* Room to give the copy the frame's alignment modulo AVX_ALIGNMENT. */
+    return sigreturn_frame_max_size() + 2 * AVX_ALIGNMENT;
+}
+#endif
+
 #if defined(X86) && defined(LINUX)
 static byte *
 get_and_initialize_xstate_buffer(dcontext_t *dcontext)
@@ -1536,6 +1555,12 @@ signal_thread_exit(dcontext_t *dcontext, bool other_thread)
         heap_free(dcontext, info->xstate_alloc,
                   signal_frame_extra_size(true) HEAPACCT(ACCT_OTHER));
     }
+#    ifdef X64
+    if (info->sigreturn_frame_alloc != NULL) {
+        heap_free(dcontext, info->sigreturn_frame_alloc,
+                  sigreturn_frame_alloc_size() HEAPACCT(ACCT_OTHER));
+    }
+#    endif
 #endif
 
     /* XXX: w/ shared handlers, if parent (the owner here) dies,
@@ -7437,6 +7462,46 @@ receive_pending_signal(dcontext_t *dcontext)
     }
 }
 
+#if defined(LINUX) && defined(X86) && defined(X64)
+/* Copies the application's rt_sigreturn frame, including its xstate, to a buffer of
+ * ours, so that we can execute the system call on the copy and leave application
+ * memory untouched.  Returns NULL if the frame's layout is unusual, in which case the
+ * caller uses the original.
+ */
+static sigframe_rt_t *
+sigreturn_copy_frame(dcontext_t *dcontext, thread_sig_info_t *info, sigframe_rt_t *frame)
+{
+    kernel_fpstate_t *fpstate = frame->uc.uc_mcontext.fpstate;
+    size_t size = sizeof(*frame);
+    byte *copy;
+    if (fpstate != NULL) {
+        size_t xstate_size = sizeof(kernel_fpstate_t);
+        if ((byte *)fpstate < (byte *)(frame + 1) ||
+            (byte *)fpstate > (byte *)(frame + 1) + AVX_ALIGNMENT)
+            return NULL;
+        if (fpstate->sw_reserved.magic1 == FP_XSTATE_MAGIC1)
+            xstate_size = fpstate->sw_reserved.extended_size;
+        size = (byte *)fpstate - (byte *)frame + xstate_size;
+    }
+    if (size > sigreturn_frame_max_size())
+        return NULL;
+    if (info->sigreturn_frame_alloc == NULL) {
+        info->sigreturn_frame_alloc =
+            heap_alloc(dcontext, sigreturn_frame_alloc_size() HEAPACCT(ACCT_OTHER));
+    }
+    /* Keep the frame's alignment, which the kernel requires of the xstate. */
+    copy = (byte *)ALIGN_FORWARD(info->sigreturn_frame_alloc, AVX_ALIGNMENT) +
+        ((ptr_uint_t)frame % AVX_ALIGNMENT);
+    if (!d_r_safe_read(frame, size, copy))
+        return NULL;
+    if (fpstate != NULL) {
+        ((sigframe_rt_t *)copy)->uc.uc_mcontext.fpstate =
+            (kernel_fpstate_t *)(copy + ((byte *)fpstate - (byte *)frame));
+    }
+    return (sigframe_rt_t *)copy;
+}
+#endif
+
 /* Returns false if should NOT issue syscall. */
 bool
 #ifdef LINUX
@@ -7455,6 +7520,9 @@ handle_sigreturn(dcontext_t *dcontext, void *ucxt_param, int style)
 #endif
 #ifdef MACOS
     bool rt = true;
+#endif
+#if defined(LINUX) && defined(X86) && defined(X64)
+    reg_t copy_xsp = 0;
 #endif
 
     LOG(THREAD, LOG_ASYNCH, 3, "%ssigreturn()\n", rt ? "rt_" : "");
@@ -7493,10 +7561,24 @@ handle_sigreturn(dcontext_t *dcontext, void *ucxt_param, int style)
         if (frame->sig != sig)
             LOG(THREAD, LOG_ASYNCH, 1, "WARNING: app sig handler clobbered sig param\n");
 #    endif
+#    if defined(X86) && defined(X64)
+        /* We change the frame below to have the kernel restore our own signal
+         * state and return to our code.  We make those changes to a copy, on
+         * which we then execute the system call, to leave application memory
+         * as it is.
+         */
+        sigframe_rt_t *copy = sigreturn_copy_frame(dcontext, info, frame);
+        if (copy != NULL) {
+            frame = copy;
+            /* Set below, after the application's state is reported. */
+            copy_xsp = (reg_t)frame + sizeof(char *);
+        }
+#    endif
         sc = get_sigcontext_from_app_frame(info, sig, (void *)frame);
         ucxt = &frame->uc;
         /* Check again for the magic words. See the i#3812 comment above. */
         IF_X86(ASSERT(
+            sc->fpstate == NULL ||
             (sc->fpstate->sw_reserved.magic1 == 0 &&
              sc->fpstate->sw_reserved.extended_size == sizeof(kernel_fpstate_t)) ||
             (sc->fpstate->sw_reserved.magic1 == FP_XSTATE_MAGIC1 &&
@@ -7699,6 +7781,11 @@ handle_sigreturn(dcontext_t *dcontext, void *ucxt_param, int style)
     LOG(THREAD, LOG_ASYNCH, 3, "set next tag to " PFX ", sc->SC_XIP to " PFX "\n",
         next_pc, sc->SC_XIP);
     info->in_app_handler = false;
+#if defined(LINUX) && defined(X86) && defined(X64)
+    /* The system call reads the frame from below the stack pointer. */
+    if (copy_xsp != 0)
+        get_mcontext(dcontext)->xsp = copy_xsp;
+#endif
 
     return IF_VMX86_ELSE(false, true);
 }
