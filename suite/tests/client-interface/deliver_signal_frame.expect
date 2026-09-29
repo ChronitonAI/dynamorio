@@ -1,0 +1,5 @@
+handler: signal 10, code 0, blocked self 1, blocked SIGUSR2 1, reset 1
+after handler: blocked SIGUSR1 0, blocked SIGUSR2 0, reset 1, values ok
+handler: signal 12, blocked self 0, on alternate stack 1, alternate stack disabled 1
+after handler: alternate stack enabled 1, values ok
+all done

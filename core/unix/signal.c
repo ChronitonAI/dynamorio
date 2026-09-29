@@ -2415,6 +2415,50 @@ set_blocked(dcontext_t *dcontext, kernel_sigset_t *set, bool absolute)
     d_r_mutex_unlock(&info->sigblocked_lock);
 }
 
+/* Updates our emulated signal state for the delivery of sig to the application
+ * through a frame that a client wrote itself, with the handler to be entered with
+ * the stack pointer handler_xsp: see dr_deliver_signal_frame().  We do what the
+ * kernel does when it sets up a handler.
+ */
+bool
+os_deliver_signal_frame(dcontext_t *dcontext, int sig, reg_t handler_xsp)
+{
+    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
+    kernel_sigaction_t *action;
+    kernel_sigset_t blocked;
+    if (sig <= 0 || sig > MAX_SIGNUM)
+        return false;
+    action = info->sighand->action[sig];
+    LOG(THREAD, LOG_ASYNCH, 2, "%s: signal %d, handler xsp " PFX "\n", __FUNCTION__, sig,
+        handler_xsp);
+    /* Block the handler's mask and, unless SA_NODEFER, the signal itself. */
+    if (action != NULL)
+        blocked = action->mask;
+    else
+        kernel_sigemptyset(&blocked);
+    if (action == NULL || !TESTANY(SA_NOMASK, action->flags))
+        kernel_sigaddset(&blocked, sig);
+    set_blocked(dcontext, &blocked, false /*relative: OR these in*/);
+    if (action != NULL && TESTANY(SA_ONESHOT, action->flags)) {
+        /* As in execute_handler_from_cache(): the handler is reset to the
+         * default, and handle_sigreturn() frees the action.
+         */
+        action->handler = (handler_t)SIG_DFL;
+    }
+    /* A handler that runs on an alternate stack with SS_AUTODISARM disarms it.  The
+     * frame's uc_stack holds the settings that the application's sigreturn restores.
+     */
+    if (APP_HAS_SIGSTACK(info) && TESTANY(SS_AUTODISARM, info->app_sigstack.ss_flags) &&
+        handler_xsp > (reg_t)info->app_sigstack.ss_sp &&
+        handler_xsp - (reg_t)info->app_sigstack.ss_sp <= info->app_sigstack.ss_size) {
+        info->app_sigstack.ss_sp = NULL;
+        info->app_sigstack.ss_size = 0;
+        info->app_sigstack.ss_flags = SS_DISABLE;
+    }
+    info->in_app_handler = true;
+    return true;
+}
+
 void
 signal_set_mask(dcontext_t *dcontext, kernel_sigset_t *sigset)
 {

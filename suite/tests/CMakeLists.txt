@@ -2853,6 +2853,12 @@ if (UNIX)
         ${CMAKE_CURRENT_SOURCE_DIR}/client-interface)
       link_with_pthread(client.mangle_suspend)
     endif ()
+    if (LINUX AND X86 AND X64)
+      tobuild_ci(client.deliver_signal_frame client-interface/deliver_signal_frame.c
+        "" "" "")
+      target_include_directories(client.deliver_signal_frame PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/client-interface)
+    endif ()
   endif (NOT ARM)
   if (X86 OR AARCH64) # XXX i#1551: port asm to AArch32
     tobuild_ci(client.syscall-mod client-interface/syscall-mod.c "" "" "")
