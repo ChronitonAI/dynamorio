@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2026 Keno Fischer.  All rights reserved.
+ * Copyright (c) 2026 Chroniton PBC.  All rights reserved.
  * **********************************************************/
 
 /*
