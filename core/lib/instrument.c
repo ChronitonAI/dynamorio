@@ -4718,6 +4718,44 @@ dr_get_dr_segment_base(DR_PARAM_IN reg_id_t seg)
 #endif
 }
 
+#if defined(LINUX) && defined(X86) && defined(X64)
+/* Returns whether DR keeps the application's base of seg in its TLS, i.e., whether
+ * the application's accesses to seg are mangled.
+ */
+static bool
+app_segment_base_is_virtual(reg_id_t seg)
+{
+    return (seg == DR_SEG_FS || seg == DR_SEG_GS) && INTERNAL_OPTION(mangle_app_seg) &&
+        (seg != LIB_SEG_TLS || INTERNAL_OPTION(private_loader));
+}
+
+DR_API
+void *
+dr_get_app_segment_base(void *drcontext, reg_id_t seg)
+{
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
+    CLIENT_ASSERT(!standalone_library, "API not supported in standalone mode");
+    CLIENT_ASSERT(dcontext != NULL && dcontext != GLOBAL_DCONTEXT,
+                  "dr_get_app_segment_base: invalid drcontext");
+    if (!app_segment_base_is_virtual(seg))
+        return NULL;
+    return os_get_app_tls_base(dcontext, seg);
+}
+
+DR_API
+bool
+dr_set_app_segment_base(void *drcontext, reg_id_t seg, void *base)
+{
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
+    CLIENT_ASSERT(!standalone_library, "API not supported in standalone mode");
+    CLIENT_ASSERT(dcontext != NULL && dcontext != GLOBAL_DCONTEXT,
+                  "dr_set_app_segment_base: invalid drcontext");
+    if (!app_segment_base_is_virtual(seg))
+        return false;
+    return os_set_app_tls_base(dcontext, seg, base);
+}
+#endif
+
 DR_API
 bool
 dr_raw_tls_calloc(DR_PARAM_OUT reg_id_t *tls_register, DR_PARAM_OUT uint *offset,

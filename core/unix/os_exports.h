@@ -260,9 +260,11 @@ os_dump_core_live(dcontext_t *dcontext, char *output_directory DR_PARAM_IN,
                   char *path DR_PARAM_OUT, size_t path_sz);
 #endif
 
-#if defined(AARCHXX) || defined(RISCV64)
 bool
 os_set_app_tls_base(dcontext_t *dcontext, reg_id_t reg, void *base);
+#if defined(LINUX) && defined(X86) && defined(X64)
+bool
+os_app_fsgsbase_enabled(void);
 #endif
 
 #if defined(MACOS) && defined(AARCH64)

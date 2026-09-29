@@ -871,6 +871,28 @@ os_set_dr_seg(dcontext_t *dcontext, reg_id_t seg)
     ASSERT(res >= 0);
 }
 
+/* Performs the application's arch_prctl(ARCH_SET_GS, base) system call on its behalf
+ * and returns the kernel's result.  The system call itself installs the new base in
+ * the register that holds our own TLS, which we need right away (the system call
+ * gencode and our signal handler use it), so the application must not execute it.
+ */
+int
+tls_handle_pre_arch_set_gs(dcontext_t *dcontext, reg_t base)
+{
+    kernel_sigset_t oset;
+    int res;
+    /* We let the kernel validate the base.  Nothing may use our TLS until we restore
+     * the register, so we block signals, whose handler uses it.
+     */
+    block_all_noncrash_signals_except(&oset, 0);
+    res = dynamorio_syscall(SYS_arch_prctl, 2, ARCH_SET_GS, base);
+    os_set_dr_seg(dcontext, SEG_GS);
+    dynamorio_syscall(SYS_rt_sigprocmask, 4, SIG_SETMASK, &oset, NULL, sizeof(oset));
+    if (res == 0)
+        tls_handle_post_arch_prctl(dcontext, ARCH_SET_GS, base);
+    return res;
+}
+
 void
 tls_handle_post_arch_prctl(dcontext_t *dcontext, int code, reg_t base)
 {

@@ -1954,6 +1954,13 @@ d_r_mangle(dcontext_t *dcontext, instrlist_t *ilist, uint *flags DR_PARAM_INOUT,
             mangle_seg_ref(dcontext, ilist, instr, next_instr);
             if (instr_get_opcode(instr) == OP_mov_seg)
                 mangle_mov_seg(dcontext, ilist, instr, next_instr);
+#    if defined(LINUX) && defined(X64)
+            else if (instr_get_opcode(instr) == OP_rdfsbase ||
+                     instr_get_opcode(instr) == OP_rdgsbase ||
+                     instr_get_opcode(instr) == OP_wrfsbase ||
+                     instr_get_opcode(instr) == OP_wrgsbase)
+                mangle_fsgsbase(dcontext, ilist, instr, next_instr);
+#    endif
         }
 #endif
 

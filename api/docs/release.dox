@@ -324,6 +324,11 @@ Further non-compatibility-affecting changes include:
    a futex (which may be shared with another process) at a point where other
    threads' flushes and other operations that suspend all threads do not need to
    wait for it.
+ - Fixed the application's arch_prctl(ARCH_SET_GS) crashing DynamoRIO on x86-64.
+ - The application's rdfsbase, wrfsbase, rdgsbase and wrgsbase instructions now
+   read and write the application's segment bases instead of DynamoRIO's.
+ - Added dr_get_app_segment_base() and dr_set_app_segment_base() for the
+   application's fs and gs bases on Linux x86-64.
 
 **************************************************
 <hr>

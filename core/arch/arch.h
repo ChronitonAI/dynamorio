@@ -740,6 +740,14 @@ mangle_annotation_helper(dcontext_t *dcontext, instr_t *label, instrlist_t *ilis
 void
 mangle_mov_seg(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
                instr_t *next_instr);
+#    if defined(LINUX) && defined(X64)
+/* mangle the instructions that read and write the fs and gs bases:
+ * OP_rdfsbase, OP_rdgsbase, OP_wrfsbase and OP_wrgsbase.
+ */
+void
+mangle_fsgsbase(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
+                instr_t *next_instr);
+#    endif
 void
 mangle_float_pc(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
                 instr_t *next_instr, uint *flags DR_PARAM_OUT);

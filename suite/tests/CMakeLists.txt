@@ -2865,6 +2865,7 @@ if (UNIX)
       target_include_directories(client.futex_wait_safe_spot PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/client-interface)
       link_with_pthread(client.futex_wait_safe_spot)
+      tobuild_ci(client.app_segment_base client-interface/app_segment_base.c "" "" "")
     endif ()
   endif (NOT ARM)
   if (X86 OR AARCH64) # XXX i#1551: port asm to AArch32
@@ -6210,6 +6211,10 @@ if (UNIX)
       torunonly_native(linux.ptrace_takeover linux.ptrace_takeover ptrace_takeover
         linux/ptrace_takeover.c
         "${ptrace_takeover_drlib};${ptrace_takeover_client};${ptrace_takeover_drrun}")
+    endif ()
+
+    if (LINUX AND X86 AND X64)
+      tobuild(linux.segment_base linux/segment_base.c)
     endif ()
 
     if (NOT ANDROID)

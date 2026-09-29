@@ -1,0 +1,6 @@
+arch_prctl gs base ok
+arch_prctl bad gs base ok
+fs base ok
+gs base ok
+32-bit forms ok
+all done
