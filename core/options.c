@@ -553,7 +553,8 @@ parse_uint_addr(ptr_uint_t *var, void *value)
     ptr_uint_t num;
     char *opt = (char *)value;
 
-    if (sscanf(opt, PIFX, &num) == 1) { /* atoi(opt) */
+    /* Accept hex with a 0x prefix, or decimal (in particular a plain "0"). */
+    if (sscanf(opt, PIFX, &num) == 1 || sscanf(opt, SZFMT, &num) == 1) {
         *var = num;
     } else {
         /* var should be pre-initialized to default */
