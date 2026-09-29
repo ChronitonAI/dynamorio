@@ -529,6 +529,9 @@ add_executable_region(app_pc start, size_t size _IF_DEBUG(const char *comment));
 bool
 remove_executable_region(app_pc start, size_t size, bool have_writelock);
 
+void
+forget_executable_region(app_pc start, size_t size);
+
 bool
 free_nonexec_coarse_and_unlock(void);
 

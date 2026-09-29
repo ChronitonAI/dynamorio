@@ -7159,6 +7159,35 @@ dr_flush_region_ex(app_pc start, size_t size,
     return true;
 }
 
+#ifdef UNIX
+DR_API
+bool
+dr_app_memory_changed(app_pc start, size_t size, uint prot)
+{
+    dcontext_t *dcontext = get_thread_private_dcontext();
+    CLIENT_ASSERT(!standalone_library, "API not supported in standalone mode");
+    ASSERT(dcontext != NULL);
+    CLIENT_ASSERT(!is_couldbelinking(dcontext),
+                  "dr_app_memory_changed: called from an event callback that doesn't "
+                  "support calling this routine; see header file for restrictions.");
+    CLIENT_ASSERT(OWN_NO_LOCKS(dcontext),
+                  "dr_app_memory_changed: caller owns a client lock or was called from "
+                  "an event callback that doesn't support calling this routine; see "
+                  "header file for restrictions.");
+    CLIENT_ASSERT(!dynamo_vm_area_overlap(start, start + size),
+                  "dr_app_memory_changed: the range overlaps DR's own memory");
+    CLIENT_ASSERT(!TESTANY(~(DR_MEMPROT_READ | DR_MEMPROT_WRITE | DR_MEMPROT_EXEC), prot),
+                  "dr_app_memory_changed: invalid protection");
+    if (size == 0 || is_couldbelinking(dcontext) ||
+        dynamo_vm_area_overlap(start, start + size))
+        return false;
+    LOG(THREAD, LOG_VMAREAS, 2, "%s: " PFX "-" PFX " %d\n", __FUNCTION__, start,
+        start + size, prot);
+    os_app_memory_changed(dcontext, start, size, prot);
+    return true;
+}
+#endif
+
 DR_API
 /* Equivalent to dr_flush_region_ex, without the callback. */
 bool

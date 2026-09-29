@@ -2850,6 +2850,25 @@ remove_executable_region(app_pc start, size_t size, bool have_writelock)
     return remove_executable_vm_area(start, start + size, have_writelock);
 }
 
+/* Like remove_executable_region(), for memory that changed without us seeing it
+ * (see os_app_memory_changed()): we do not restore the page protections that we
+ * changed in the region, as they are stale, and we also forget any writability we
+ * pretended.  The caller must hold the executable_areas lock and flush the region.
+ */
+void
+forget_executable_region(app_pc start, size_t size)
+{
+    ASSERT_OWN_WRITE_LOCK(true, &executable_areas->lock);
+    LOG(GLOBAL, LOG_VMAREAS, 2, "forgetting executable vm area: " PFX "-" PFX "\n", start,
+        start + size);
+    remove_vm_area(executable_areas, start, start + size, false /*leave prot alone*/);
+    if (pretend_writable_areas != NULL) {
+        d_r_write_lock(&pretend_writable_areas->lock);
+        remove_vm_area(pretend_writable_areas, start, start + size, false);
+        d_r_write_unlock(&pretend_writable_areas->lock);
+    }
+}
+
 /* To give clients a chance to process pcaches as we load them, we
  * delay the loading until we've initialized the clients.
  */

@@ -2486,6 +2486,37 @@ DR_API
 bool
 dr_flush_region(app_pc start, size_t size);
 
+#ifdef UNIX
+DR_API
+/**
+ * Informs DR that the application's memory in [\p start, \p start + \p size)
+ * changed without DR observing the change, and that the application's memory in
+ * the range now has the protection \p prot (a combination of #DR_MEMPROT_READ,
+ * #DR_MEMPROT_WRITE and #DR_MEMPROT_EXEC).  For example, another process wrote to
+ * the range (such as through /proc/pid/mem, which bypasses page protections and
+ * with them DR's detection of code modification), or mapped memory or changed
+ * protections in the range (such as a debugger performing system calls in this
+ * process).  DR throws away the code cache fragments built from the range (as
+ * dr_flush_region() does) and the executable status it gave the range, sets the
+ * protection of the memory mapped in the range to \p prot (replacing any
+ * protection changes DR made itself, e.g., to detect code modification), and
+ * updates its view of the range's mappings and their protections from the operating
+ * system.  DR re-establishes its handling of code in the range when the application
+ * next executes it.  New modules mapped in the range are not detected.
+ *
+ * The restrictions of dr_flush_region() apply: this routine may only be called
+ * from a clean call from the code cache, from a nudge, or from the pre- and
+ * post-system-call events, with no locks held; from a clean call, the caller
+ * must use dr_redirect_execution() to return to the application.
+ *
+ * \return false if \p size is 0 or the range overlaps DR's own memory.
+ *
+ * \note Linux only.
+ */
+bool
+dr_app_memory_changed(app_pc start, size_t size, uint prot);
+#endif
+
 /* XXX - get rid of the no locks requirement by making event callbacks !couldbelinking
  * and no dr locks (see PR 227619) so that client locks owned by this thread can't block
  * any couldbelinking thread.  XXX - would be nice to make this available for

@@ -242,6 +242,8 @@ os_wait_thread_detached(dcontext_t *dcontext);
 void
 os_signal_thread_detach(dcontext_t *dcontext);
 void
+os_app_memory_changed(dcontext_t *dcontext, app_pc start, size_t size, uint prot);
+void
 os_tls_pre_init(int gdt_index);
 ushort
 os_get_app_tls_base_offset(reg_id_t seg);
