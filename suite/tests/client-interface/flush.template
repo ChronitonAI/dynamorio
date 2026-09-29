@@ -1,5 +1,6 @@
 #if defined(thread_private) || defined(enable_full_api)
 options = use_unlink
+flush of non-code region returned 1
 kernel_xfer_event: type 9
 Flush completion id=100
 kernel_xfer_event: type 9
@@ -10,6 +11,7 @@ kernel_xfer_event: type 9
 Flush completion id=400
 #else
 options =@&
+flush of non-code region returned 1
 in synch_flush_completion_callback, user_data=200
 kernel_xfer_event: type 9
 Flush completion id=200

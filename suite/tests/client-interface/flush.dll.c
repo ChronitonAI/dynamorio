@@ -189,6 +189,14 @@ callback(void *tag, app_pc next_pc)
 {
     callback_count++;
 
+    if (callback_count == 1) {
+        /* Flushing a region that was never executed from returns early: make sure
+         * that works without a completion callback.
+         */
+        bool res = dr_flush_region((app_pc)&callback_count, sizeof(callback_count));
+        dr_fprintf(STDERR, "flush of non-code region returned %d\n", res);
+    }
+
     /* Flush all fragments containing this tag twice every hundred calls alternating
      * between a sync_all and delay flush (if available) and an unlink and delay flush
      * (if available). */
