@@ -145,6 +145,12 @@ typedef struct _drreg_options_t {
      * This allows drreg to reduce overhead.  This flag can be set to
      * request that drreg not make this assumption.
      *
+     * With this flag, drreg treats every general-purpose register as live
+     * and does not analyze their liveness: drreg_is_register_dead() reports
+     * no register as dead, and drreg_reserve_dead_register() only succeeds
+     * with a register whose application value drreg has already spilled.
+     * The liveness of the arithmetic flags is still analyzed and used.
+     *
      * If multiple drreg_init() calls are made, this field is combined by
      * logical OR.
      *
@@ -387,7 +393,10 @@ drreg_reserve_register(void *drcontext, instrlist_t *ilist, instr_t *where,
 DR_EXPORT
 /**
  * Identical to drreg_reserve_register() except returns failure if no
- * register is available that does not require a spill.
+ * register is available that does not require a spill.  With \p conservative
+ * set in \p drreg_options_t, every register requires a spill unless drreg
+ * already spilled its application value (for an earlier reservation whose
+ * restore is pending).
  *
  * @return whether successful or an error code on failure.
  */
@@ -631,7 +640,8 @@ DR_EXPORT
 /**
  * Returns in \p dead whether the register \p reg is dead at the
  * point of \p inst.  If called during drmgr's insertion phase, \p
- * inst must be the current application instruction.
+ * inst must be the current application instruction.  With \p conservative
+ * set in \p drreg_options_t, no register is dead.
  *
  * @return whether successful or an error code on failure.
  */

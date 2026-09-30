@@ -3188,6 +3188,9 @@ if (NOT RISCV64) # TODO i#3544: Port tests to RISC-V 64
   use_DynamoRIO_extension(client.drreg-test.dll drx)
   target_include_directories(client.drreg-test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/client-interface)
+  # drreg without analyzing register liveness.
+  torunonly_ci(client.drreg-test-conservative client.drreg-test client.drreg-test.dll
+    client-interface/drreg-test.c "-conservative" "" "")
   endif ()
 
   tobuild_ci(client.drreg-end-restore client-interface/drreg-end-restore.c "" "" "")

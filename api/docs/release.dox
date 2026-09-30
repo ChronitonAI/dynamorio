@@ -211,6 +211,11 @@ compatibility changes:
    instead of dr_register_pre_detach_event() when using drmgr and provide
    priorities and user data to the pre-detach event.
  - A C++17-supporting toolchain is now required to build.
+ - With drreg_options_t.conservative set, drreg treats every general-purpose
+   register as live and no longer analyzes their liveness for each block:
+   drreg_is_register_dead() reports no register as dead (so, e.g., drbbdup now
+   preserves its scratch register), and drreg_reserve_dead_register() fails unless
+   it can reuse a register whose application value drreg already spilled.
 
 Further non-compatibility-affecting changes include:
  - Changed the types of `block_size`, `total_size`, `num_blocks`, to `int64_t`

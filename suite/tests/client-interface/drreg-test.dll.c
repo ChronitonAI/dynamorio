@@ -43,6 +43,8 @@
 #define MAGIC_VAL 0xabcd
 
 static ptr_uint_t note_base;
+/* Whether drreg is in conservative mode (the client option -conservative). */
+static bool conservative;
 #define NOTE_VAL(enum_val) ((void *)(ptr_int_t)(note_base + (enum_val)))
 
 /* Enum describing the different types of notes in drreg-test. */
@@ -474,7 +476,7 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst
                instr_get_app_pc(inst), get_register_name(reg));
         /* test restore app value back to reg */
         res = drreg_get_app_value(drcontext, bb, inst, reg, reg);
-        CHECK(res == DRREG_SUCCESS || res == DRREG_ERROR_NO_APP_VALUE,
+        CHECK(res == DRREG_SUCCESS || (!conservative && res == DRREG_ERROR_NO_APP_VALUE),
               "restore app value could only fail on dead reg");
         /* test get stolen reg to reg */
         if (dr_get_stolen_reg() != REG_NULL) {
@@ -483,7 +485,7 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst
         }
         /* test get random reg to reg */
         res = drreg_get_app_value(drcontext, bb, inst, random, reg);
-        CHECK(res == DRREG_SUCCESS || res == DRREG_ERROR_NO_APP_VALUE,
+        CHECK(res == DRREG_SUCCESS || (!conservative && res == DRREG_ERROR_NO_APP_VALUE),
               "get random reg app value should only fail on dead reg");
         if (res == DRREG_ERROR_NO_APP_VALUE) {
             bool dead;
@@ -541,6 +543,7 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst
         bool is_dead;
         res = drreg_is_register_dead(drcontext, reg, inst, &is_dead);
         CHECK(res == DRREG_SUCCESS, "query should work");
+        CHECK(!conservative || !is_dead, "no register is dead when conservative");
         instr_t *prev;
         bool found_restore = false;
         for (prev = instr_get_prev(inst); prev != NULL; prev = instr_get_prev(prev)) {
@@ -1150,6 +1153,7 @@ event_instru2instru(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
           "aflags liveness inconsistency");
     res = drreg_is_register_dead(drcontext, DR_REG_START_GPR, inst, &dead);
     CHECK(res == DRREG_SUCCESS, "query of liveness should work");
+    CHECK(!conservative || !dead, "no register is dead when conservative");
 
     if (subtest == DRREG_TEST_2_C) {
         /* We are running one more subtest on top of DRREG_TEST_2. Any subtest where
@@ -1194,12 +1198,16 @@ event_exit(void)
 }
 
 DR_EXPORT void
-dr_init(client_id_t id)
+dr_client_main(client_id_t id, int argc, const char *argv[])
 {
     /* We actually need 3 slots (flags + 2 scratch) but we want to test using
      * a DR slot.
      */
     drreg_options_t ops = { sizeof(ops), 2 /*max slots needed*/, false };
+    /* With -conservative, drreg treats every register as live. */
+    if (argc > 1 && strcmp(argv[1], "-conservative") == 0)
+        conservative = true;
+    ops.conservative = conservative;
     if (!drmgr_init() || drreg_init(&ops) != DRREG_SUCCESS)
         CHECK(false, "init failed");
 
