@@ -136,6 +136,11 @@ static drreg_options_t ops;
  * all of drreg's events for it agree.
  */
 static volatile bool enabled = true;
+/* Decides for each block whether drreg processes it, if set, in addition to "enabled"
+ * (drreg_set_enabled_func()).
+ */
+static bool (*volatile enabled_func)(void *drcontext, void *tag, bool for_trace,
+                                     bool translating);
 
 static int tls_idx = -1;
 static uint tls_slot_offs;
@@ -369,9 +374,11 @@ drreg_event_bb_analysis(void *drcontext, void *tag, instrlist_t *bb, bool for_tr
     ptr_uint_t aflags_new, aflags_cur = 0;
     uint index = 0;
     reg_id_t reg;
+    bool (*func)(void *, void *, bool, bool) = enabled_func;
 
     /* Reset in drreg_event_bb_instru2instru_late(). */
-    pt->bb_disabled = !enabled;
+    pt->bb_disabled =
+        !enabled || (func != NULL && !(*func)(drcontext, tag, for_trace, translating));
     if (pt->bb_disabled)
         return DR_EMIT_DEFAULT;
 
@@ -2558,6 +2565,16 @@ drreg_set_enabled(bool enable)
 }
 
 drreg_status_t
+drreg_set_enabled_func(bool (*func)(void *drcontext, void *tag, bool for_trace,
+                                    bool translating))
+{
+    if (drreg_init_count == 0)
+        return DRREG_ERROR;
+    enabled_func = func;
+    return DRREG_SUCCESS;
+}
+
+drreg_status_t
 drreg_init(drreg_options_t *ops_in)
 {
     uint prior_slots = ops.num_spill_slots;
@@ -2676,6 +2693,7 @@ drreg_exit(void)
     }
 
     enabled = true;
+    enabled_func = NULL;
 
     /* Support re-attach. */
     if (dr_is_detaching()) {

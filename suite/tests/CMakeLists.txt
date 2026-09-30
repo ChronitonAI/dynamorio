@@ -3171,6 +3171,10 @@ if (NOT RISCV64) # TODO i#3544: Port tests to RISC-V 64
   tobuild_ci(client.drreg-disable-test client-interface/drreg-disable-test.c "" "" "")
   use_DynamoRIO_extension(client.drreg-disable-test.dll drmgr)
   use_DynamoRIO_extension(client.drreg-disable-test.dll drreg)
+  tobuild_ci(client.drreg-enabled-func-test client-interface/drreg-enabled-func-test.c
+    "" "" "")
+  use_DynamoRIO_extension(client.drreg-enabled-func-test.dll drmgr)
+  use_DynamoRIO_extension(client.drreg-enabled-func-test.dll drreg)
 
   tobuild_ci(client.drreg-flow client-interface/drreg-flow.c "" "" "")
   use_DynamoRIO_extension(client.drreg-flow.dll drmgr)
