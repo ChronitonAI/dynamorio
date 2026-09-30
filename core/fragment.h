@@ -146,8 +146,6 @@
 #    define FRAG_STARTS_RSEQ_REGION 0x4000000
 #endif
 
-#define FRAG_CBR_FALLTHROUGH_SHORT 0x8000000
-
 /* Indicates coarse-grain cache management, i.e., batch units with
  * no individual fragment_t.
  */

@@ -4190,13 +4190,6 @@ build_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
             LOG(THREAD, LOG_INTERP, 3, "set fall-throught target " PFX " by client\n",
                 bb->exit_target);
         }
-        if (bb->instr != NULL && instr_opcode_valid(bb->instr) &&
-            instr_is_cbr(bb->instr) &&
-            (int)(bb->exit_target - bb->start_pc) <= SHRT_MAX &&
-            (int)(bb->exit_target - bb->start_pc) >= SHRT_MIN &&
-            /* rule out jecxz, etc. */
-            !instr_is_cti_loop(bb->instr))
-            bb->flags |= FRAG_CBR_FALLTHROUGH_SHORT;
     }
     /* we share all basic blocks except selfmod (since want no-synch quick deletion)
      * or syscall-containing ones (to bound delay on threads exiting shared cache,
