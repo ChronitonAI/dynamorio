@@ -1,0 +1,12 @@
+plain: 1
+marked: 2
+fault at the expected pc
+fault at the expected pc
+getpid plain: correct
+getpid marked: correct
+loops done
+all done
+markers executed: 1003
+bb event: called, when translating: called
+filter: called, passed some: yes, when translating: called
+filter for traces: called

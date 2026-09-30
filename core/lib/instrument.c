@@ -222,6 +222,9 @@ static callback_list_t low_on_memory_callbacks = {
 static callback_list_t bb_callbacks = {
     0,
 };
+static callback_list_t bb_filter_callbacks = {
+    0,
+};
 static callback_list_t trace_callbacks = {
     0,
 };
@@ -863,6 +866,7 @@ free_all_callback_lists(void)
 #endif
     free_callback_list(&low_on_memory_callbacks);
     free_callback_list(&bb_callbacks);
+    free_callback_list(&bb_filter_callbacks);
     free_callback_list(&trace_callbacks);
     free_callback_list(&end_trace_callbacks);
     free_callback_list(&fragdel_callbacks);
@@ -1072,6 +1076,25 @@ dr_unregister_bb_event(dr_emit_flags_t (*func)(void *drcontext, void *tag,
                                                bool translating))
 {
     return remove_callback(&bb_callbacks, (void (*)(void))func, true);
+}
+
+void
+dr_register_bb_filter_event(bool (*func)(void *drcontext, void *tag, app_pc end,
+                                         bool for_trace, bool translating))
+{
+    if (!INTERNAL_OPTION(code_api)) {
+        CLIENT_ASSERT(false, "asking for bb filter event when code_api is disabled");
+        return;
+    }
+
+    add_callback(&bb_filter_callbacks, (void (*)(void))func, true);
+}
+
+bool
+dr_unregister_bb_filter_event(bool (*func)(void *drcontext, void *tag, app_pc end,
+                                           bool for_trace, bool translating))
+{
+    return remove_callback(&bb_filter_callbacks, (void (*)(void))func, true);
 }
 
 void
@@ -1597,6 +1620,12 @@ dr_bb_hook_exists(void)
 }
 
 bool
+dr_bb_filter_hook_exists(void)
+{
+    return (bb_filter_callbacks.num > 0);
+}
+
+bool
 dr_trace_hook_exists(void)
 {
     return (trace_callbacks.num > 0);
@@ -1786,6 +1815,26 @@ instrument_basic_block(dcontext_t *dcontext, app_pc tag, instrlist_t *bb, bool f
 #endif
 
     return true;
+}
+
+/* Returns whether the bb event is to be called for the block whose code, decoded as
+ * though no bb event were registered, is [tag, end): true if any bb filter says so
+ * (or none is registered anymore).
+ */
+bool
+instrument_basic_block_filter(dcontext_t *dcontext, app_pc tag, app_pc end,
+                              bool for_trace, bool translating)
+{
+    bool ret = false;
+    if (bb_filter_callbacks.num == 0)
+        return true;
+    /* The bb event does not see these blocks either. */
+    if (hide_tag_from_client(tag))
+        return false;
+    call_all_ret(ret, |=, , bb_filter_callbacks,
+                 bool (*)(void *, void *, app_pc, bool, bool), (void *)dcontext,
+                 (void *)tag, end, for_trace, translating);
+    return ret;
 }
 
 /* Give the user the completely mangled and optimized trace just prior

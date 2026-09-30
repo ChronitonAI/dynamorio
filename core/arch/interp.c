@@ -193,6 +193,9 @@ typedef struct {
                                 */
     bool post_client;          /* has the client already processed the bb? */
     bool for_trace;            /* PR 299808: we tell client if building a trace */
+    bool filter_pending;       /* built as though no bb hook existed, for the bb filter
+                                * hook to decide whether the bb is passed to client */
+    bool filter_passed;        /* out: the bb filter hook wants the bb for the client */
 
     /* in and out */
     overlap_info_t *overlap_info; /* if non-null, records overlap information here;
@@ -3212,7 +3215,7 @@ bb_safe_to_stop(dcontext_t *dcontext, instrlist_t *ilist, instr_t *stop_after)
  */
 DISABLE_NULL_SANITIZER
 static void
-build_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
+build_bb_ilist_common(dcontext_t *dcontext, build_bb_t *bb)
 {
     /* Design decision: we will not try to identify branches that target
      * instructions in this basic block, when we take those branches we will
@@ -3413,7 +3416,7 @@ build_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
                             bb->vmlist = NULL;
                         }
                         bb->full_decode = true;
-                        build_bb_ilist(dcontext, bb);
+                        build_bb_ilist_common(dcontext, bb);
                         return;
                     }
                 }
@@ -4086,7 +4089,7 @@ build_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
         bb->exit_type = 0;      /* i#577 */
         bb->exit_target = NULL; /* i#928 */
         /* overlap info will be reset by check_new_page_start */
-        build_bb_ilist(dcontext, bb);
+        build_bb_ilist_common(dcontext, bb);
         return;
     }
 
@@ -4094,6 +4097,25 @@ build_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
         ASSERT(bb->full_decode);
         ASSERT(!bb->follow_direct);
         ASSERT(!TESTANY(FRAG_HAS_DIRECT_CTI, bb->flags));
+    }
+
+    if (bb->filter_pending) {
+        /* See build_bb_ilist(): we built the bb as though no bb hook existed. */
+        bb->filter_pending = false;
+        if (TESTANY(FRAG_SELFMOD_SANDBOXED | FRAG_HAS_DIRECT_CTI, bb->flags) ||
+            bb->pretend_pc != NULL ||
+            instrument_basic_block_filter(dcontext, bb->start_pc, bb->end_pc,
+                                          bb->for_trace, !bb->app_interp)) {
+            bb->filter_passed = true;
+            /* build_bb_ilist() discards the bb. */
+            if (!bb_build_nested && !bb->for_cache && my_dcontext != NULL) {
+                ASSERT(my_dcontext->bb_build_info == (void *)bb);
+                my_dcontext->bb_build_info = NULL;
+            }
+            bb->instr = NULL;
+            return;
+        }
+        STATS_INC(num_bb_filtered_out);
     }
 
 #ifdef HOT_PATCHING_INTERFACE
@@ -4413,9 +4435,52 @@ build_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
 
     if (!mangle_bb_ilist(dcontext, bb)) {
         /* have to rebuild bb w/ new bb flags set by mangle_bb_ilist */
-        build_bb_ilist(dcontext, bb);
+        build_bb_ilist_common(dcontext, bb);
         return;
     }
+}
+
+/* Builds the bb as build_bb_ilist_common() does, except that if bb->pass_to_client
+ * and a bb filter hook exists, it first builds the bb as though no bb hook existed
+ * (without a full decode, for_cache) and asks the filter hooks whether to pass the bb
+ * to the client; only if so, it builds the bb again for the client.  Translation goes
+ * through here as well and so sees the same bb.
+ */
+static void
+build_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
+{
+    build_bb_t for_client;
+    if (!bb->pass_to_client || !dr_bb_filter_hook_exists()) {
+        build_bb_ilist_common(dcontext, bb);
+        return;
+    }
+    for_client = *bb;
+    bb->pass_to_client = false;
+    /* init_interp_build_bb() set these only for the client (or a trace hook, which
+     * needs them regardless).  Other callers, such as recreate_bb_ilist(), set them
+     * for their own purposes and are !for_cache, which implies a full decode anyway.
+     */
+    if (bb->for_cache && bb->unmangled_ilist == NULL) {
+        bb->record_translation = false;
+        bb->full_decode = false;
+    }
+    bb->filter_pending = true;
+    bb->filter_passed = false;
+    build_bb_ilist_common(dcontext, bb);
+    if (!bb->filter_passed)
+        return;
+    /* Discard that bb and build it again for the client.  The first build extended
+     * the vmlist that the caller may have started with check_new_page_start(), so we
+     * start over.
+     */
+    ASSERT(bb->ilist != NULL);
+    instrlist_clear_and_destroy(dcontext, bb->ilist);
+    if (bb->vmlist != NULL)
+        vm_area_destroy_list(dcontext, bb->vmlist);
+    *bb = for_client;
+    bb->vmlist = NULL;
+    bb->checked_start_vmarea = false;
+    build_bb_ilist_common(dcontext, bb);
 }
 
 /* Call when about to throw exception or other drastic action in the
