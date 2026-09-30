@@ -427,6 +427,27 @@ drbbdup_exit(void);
 
 DR_EXPORT
 /**
+ * Enables (\p enable true, the default after drbbdup_init()) or disables drbbdup for the
+ * basic blocks built from now on. drbbdup does not duplicate, analyse or instrument a
+ * block built while it is disabled, nor call any of the call-back functions in
+ * #drbbdup_options_t for it: the block is built by the other drmgr passes alone, as if
+ * drbbdup were not initialised. This lets a client avoid drbbdup's cost for all blocks
+ * while it needs no duplication, for example in a mode of execution that it switches
+ * to and from rarely.
+ *
+ * Blocks built before the call are not affected. As DR rebuilds a block to translate a
+ * fault or signal inside it, a block must never be translated in the other state from
+ * the one it was built in: the client must flush all blocks built in the other state
+ * (e.g., with a synchronous dr_flush_region() of all code) together with the change,
+ * before any of them runs again.
+ *
+ * @return whether successful or an error code on failure.
+ */
+drbbdup_status_t
+drbbdup_set_enabled(bool enable);
+
+DR_EXPORT
+/**
  * Registers a non-default case encoding \p encoding. The function should only be called
  * by a #drbbdup_set_up_bb_dups_t call-back function which provides \p drbbdup_ctx.
  *
