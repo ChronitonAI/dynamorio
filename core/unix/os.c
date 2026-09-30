@@ -10827,6 +10827,41 @@ os_futex_wait_at_safe_spot(dcontext_t *dcontext, volatile int *futex, int val,
 }
 #endif
 
+/* Returns whether all of [start, end) is mapped with the protection prot, according to
+ * both the kernel and our memory cache, and without protection changes of our own, so
+ * that at most the contents of the memory changed.
+ */
+static bool
+app_memory_protection_unchanged(app_pc start, app_pc end, uint prot)
+{
+    memquery_iter_t iter;
+    app_pc pc = start;
+    if (vm_area_protection_changed(start, end))
+        return false;
+    while (pc < end) {
+        byte *base;
+        size_t size;
+        uint cache_prot;
+        if (!get_memory_info(pc, &base, &size, &cache_prot) ||
+            (cache_prot & (MEMPROT_READ | MEMPROT_WRITE | MEMPROT_EXEC)) != prot ||
+            base + size <= pc)
+            return false;
+        pc = base + size;
+    }
+    pc = start;
+    memquery_iterator_start(&iter, start, true /*may alloc*/);
+    while (pc < end && memquery_iterator_next(&iter)) {
+        if (iter.vm_end <= pc)
+            continue;
+        if (iter.vm_start > pc ||
+            (iter.prot & (MEMPROT_READ | MEMPROT_WRITE | MEMPROT_EXEC)) != prot)
+            break;
+        pc = iter.vm_end;
+    }
+    memquery_iterator_stop(&iter);
+    return pc >= end;
+}
+
 /* See dr_app_memory_changed(). */
 void
 os_app_memory_changed(dcontext_t *dcontext, app_pc start, size_t size, uint prot)
@@ -10835,6 +10870,14 @@ os_app_memory_changed(dcontext_t *dcontext, app_pc start, size_t size, uint prot
     app_pc end = (app_pc)ALIGN_FORWARD(start + size, PAGE_SIZE);
     app_pc pc = (app_pc)ALIGN_BACKWARD(start, PAGE_SIZE);
     memquery_iter_t iter;
+    if (app_memory_protection_unchanged(pc, end, prot)) {
+        /* Only the contents changed, so our view of the range is still valid: we need
+         * only throw away the fragments with code from the range.
+         */
+        LOG(THREAD, LOG_VMAREAS, 2, "%s: only the contents changed\n", __FUNCTION__);
+        flush_fragments_exact(dcontext, start, size, NULL);
+        return;
+    }
     start = pc;
     /* Throw away the code we built from the range and the range's executable status.
      * We do not restore the page protections we changed there (to detect code
