@@ -39,6 +39,7 @@
 #include <sys/syscall.h>
 
 #define MARKER_MEMORY_CHANGED 0x7eca0301
+#define MARKER_CONTENTS_CHANGED 0x7eca0302
 
 /* An mprotect that DR does not see. */
 static long
@@ -76,18 +77,47 @@ at_marker(byte *code, app_pc next_pc)
     CHECK(false, "should not be reached");
 }
 
+/* The application changed the second byte of the block at code (through
+ * /proc/self/mem), where another block follows at code + 64.
+ */
+static void
+at_contents_marker(byte *code, app_pc next_pc)
+{
+    void *drcontext = dr_get_current_drcontext();
+    dr_mcontext_t mc = { sizeof(mc), DR_MC_ALL };
+    CHECK(dr_fragment_exists_at(drcontext, code) &&
+              dr_fragment_exists_at(drcontext, code + 64),
+          "blocks not built");
+    if (!dr_app_memory_changed(code + 1, 1, DR_MEMPROT_READ | DR_MEMPROT_EXEC))
+        dr_fprintf(STDERR, "dr_app_memory_changed failed\n");
+    /* Only the changed block's fragment is gone. */
+    CHECK(!dr_fragment_exists_at(drcontext, code), "changed block not flushed");
+    CHECK(dr_fragment_exists_at(drcontext, code + 64), "other block flushed");
+    dr_fprintf(STDERR, "client: only the changed block was flushed\n");
+    dr_get_mcontext(drcontext, &mc);
+    mc.pc = next_pc;
+    dr_redirect_execution(&mc);
+    CHECK(false, "should not be reached");
+}
+
 static dr_emit_flags_t
 event_bb(void *drcontext, void *tag, instrlist_t *bb, bool for_trace, bool translating)
 {
     instr_t *instr;
     for (instr = instrlist_first_app(bb); instr != NULL;
          instr = instr_get_next_app(instr)) {
-        if (instr_get_opcode(instr) == OP_mov_imm &&
-            opnd_is_reg(instr_get_dst(instr, 0)) &&
-            opnd_get_reg(instr_get_dst(instr, 0)) == DR_REG_EAX &&
-            opnd_is_immed_int(instr_get_src(instr, 0)) &&
-            opnd_get_immed_int(instr_get_src(instr, 0)) == MARKER_MEMORY_CHANGED) {
-            dr_insert_clean_call(drcontext, bb, instr, (void *)at_marker,
+        ptr_int_t marker;
+        if (instr_get_opcode(instr) != OP_mov_imm ||
+            !opnd_is_reg(instr_get_dst(instr, 0)) ||
+            opnd_get_reg(instr_get_dst(instr, 0)) != DR_REG_EAX ||
+            !opnd_is_immed_int(instr_get_src(instr, 0)))
+            continue;
+        marker = opnd_get_immed_int(instr_get_src(instr, 0));
+        if (marker == MARKER_MEMORY_CHANGED || marker == MARKER_CONTENTS_CHANGED) {
+            dr_insert_clean_call(drcontext, bb, instr,
+                                 marker == MARKER_MEMORY_CHANGED
+                                     ? (void *)at_marker
+                                     : (void *)at_contents_marker,
                                  false /*fpstate*/, 2, opnd_create_reg(DR_REG_XDX),
                                  OPND_CREATE_INTPTR(instr_get_app_pc(instr) +
                                                     instr_length(drcontext, instr)));

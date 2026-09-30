@@ -3834,6 +3834,18 @@ pretend_writable_vm_area_overlap(app_pc start, app_pc end)
     return overlap;
 }
 
+/* Returns whether we changed the protection of any of the memory in [start, end): made
+ * writable code read-only, or pretend that read-only memory is writable.
+ */
+bool
+vm_area_protection_changed(app_pc start, app_pc end)
+{
+    bool changed = is_executable_area_writable_overlap(start, end) != NULL;
+    if (!changed && pretend_writable_areas != NULL)
+        changed = pretend_writable_vm_area_overlap(start, end);
+    return changed;
+}
+
 #ifdef DEBUG
 /* returns comment for addr, if there is one, else NULL
  */

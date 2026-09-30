@@ -2,4 +2,7 @@ before the change: 2
 client: data page is read-only
 after the change: 2
 after writing the code: 3
+before the change: 3
+client: only the changed block was flushed
+after the change: 4
 all done

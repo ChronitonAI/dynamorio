@@ -533,6 +533,9 @@ void
 forget_executable_region(app_pc start, size_t size);
 
 bool
+vm_area_protection_changed(app_pc start, app_pc end);
+
+bool
 free_nonexec_coarse_and_unlock(void);
 
 /* add dynamo-internal area to the dynamo-internal area list */

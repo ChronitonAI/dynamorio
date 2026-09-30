@@ -2502,7 +2502,11 @@ DR_API
  * protection changes DR made itself, e.g., to detect code modification), and
  * updates its view of the range's mappings and their protections from the operating
  * system.  DR re-establishes its handling of code in the range when the application
- * next executes it.  New modules mapped in the range are not detected.
+ * next executes it.  New modules mapped in the range are not detected.  If all of the
+ * range is mapped with the protection \p prot already, according to both DR and the
+ * operating system, and DR did not change its protection itself, only the contents
+ * of the range can have changed: DR then only throws away the fragments that contain
+ * code from the range (see #DR_FLUSH_EXACT) and keeps its view of the range.
  *
  * The restrictions of dr_flush_region() apply: this routine may only be called
  * from a clean call from the code cache, from a nudge, or from the pre- and

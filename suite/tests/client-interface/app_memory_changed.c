@@ -32,7 +32,8 @@
 
 /* Tests dr_app_memory_changed(): the app changes its code through /proc/self/mem,
  * which DR does not notice, and the client changes a page's protection with a raw
- * system call.  See app_memory_changed.dll.c.
+ * system call.  When only the contents of code changed, DR keeps the fragments of the
+ * code around it.  See app_memory_changed.dll.c.
  */
 
 #include "tools.h"
@@ -44,6 +45,7 @@
 
 /* The client acts on "mov $MARKER_*, %eax" preceded by "mov <arg>, %rdx". */
 #define MARKER_MEMORY_CHANGED 0x7eca0301
+#define MARKER_CONTENTS_CHANGED 0x7eca0302
 #define MARKER(kind, arg)                              \
     __asm__ __volatile__("mov %0, %%rdx\n\t"           \
                          "mov %1, %%eax"               \
@@ -86,6 +88,27 @@ main(int argc, char **argv)
     /* DR must still notice ordinary changes to the code. */
     code[1] = 3;
     print("after writing the code: %d\n", ((func_t)code)());
+
+    /* Read-only code, of which only one block changes. */
+    byte *ro_code =
+        mmap(NULL, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (ro_code == MAP_FAILED) {
+        print("mmap failed\n");
+        return 1;
+    }
+    memcpy(ro_code, return_1, sizeof(return_1));
+    memcpy(ro_code + 64, return_2, sizeof(return_2));
+    if (mprotect(ro_code, PAGE_SIZE, PROT_READ | PROT_EXEC) != 0)
+        print("mprotect failed\n");
+    result = ((func_t)ro_code)() + ((func_t)(ro_code + 64))();
+    print("before the change: %d\n", result);
+    fd = open("/proc/self/mem", O_RDWR);
+    if (fd < 0 || pwrite(fd, return_2 + 1, 1, (off_t)(ro_code + 1)) != 1)
+        print("writing /proc/self/mem failed\n");
+    close(fd);
+    MARKER(MARKER_CONTENTS_CHANGED, ro_code);
+    result = ((func_t)ro_code)() + ((func_t)(ro_code + 64))();
+    print("after the change: %d\n", result);
     print("all done\n");
     return 0;
 }
