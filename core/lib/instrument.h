@@ -102,6 +102,9 @@ instrument_fork_init(dcontext_t *dcontext);
 bool
 instrument_basic_block(dcontext_t *dcontext, app_pc tag, instrlist_t *bb, bool for_trace,
                        bool translating, dr_emit_flags_t *emitflags);
+bool
+instrument_basic_block_filter(dcontext_t *dcontext, app_pc tag, app_pc end,
+                              bool for_trace, bool translating);
 dr_emit_flags_t
 instrument_trace(dcontext_t *dcontext, app_pc tag, instrlist_t *trace, bool translating);
 dr_custom_trace_action_t
@@ -187,6 +190,8 @@ instrument_client_lib_unloaded(byte *start, byte *end);
 
 bool
 dr_bb_hook_exists(void);
+bool
+dr_bb_filter_hook_exists(void);
 bool
 dr_trace_hook_exists(void);
 bool

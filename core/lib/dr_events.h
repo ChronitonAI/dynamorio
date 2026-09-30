@@ -427,6 +427,60 @@ bool dr_unregister_bb_event(dr_emit_flags_t (*func)(void *drcontext, void *tag,
 
 DR_API
 /**
+ * Registers a callback function for the basic block filter event, which decides
+ * for each new basic block whether the basic block event (see
+ * #dr_register_bb_event()) is called for it.  A tool that instruments only some
+ * blocks can use it to avoid the cost of preparing every block for the basic block
+ * event: DR decodes every instruction of a block that it passes to the basic block
+ * event and then processes each of them individually.
+ *
+ * Once a filter is registered, DR first builds each new basic block as though no
+ * basic block event were registered and then calls \p func with the application
+ * address range [\p tag, \p end) of the block's code, which DR has just decoded.
+ * - If \p func returns false, and so do the other registered filters, DR emits the
+ *   block as it is: none of the basic block events are called for it.  This holds
+ *   for the basic block events of all components, including other clients and
+ *   Extensions: a filter that returns false for a block must know that no component
+ *   needs to see it.
+ * - If any filter returns true, DR discards the block and builds it again for the
+ *   basic block event, exactly as when no filter is registered.  The block that the
+ *   basic block event sees can end before \p end.
+ *
+ * DR calls the filter again when it recreates a block to translate a code cache
+ * address, with \p translating set to true, and for a block that it adds to a trace,
+ * with \p for_trace set to true.  As the basic block event must repeat its
+ * instrumentation, the filter must return the same value when translating as it did
+ * when the block was built (see #dr_register_bb_event()).
+ *
+ * DR does not call the filter, and calls the basic block event, for a block whose
+ * code is not contiguous (see the -max_elide_jmp and -max_elide_call runtime options)
+ * and for a block that it sandboxes because the block's code may modify itself.
+ *
+ * \p drcontext and \p tag are as in the basic block event.  \p func can read and
+ * decode the block's code (e.g., with decode_sizeof() or decode()); it must not
+ * modify it.
+ */
+void
+dr_register_bb_filter_event(bool (*func)(void *drcontext, void *tag, app_pc end,
+                                         bool for_trace, bool translating));
+
+DR_API
+/**
+ * Unregister a callback function for the basic block filter event.
+ * \return true if unregistration is successful and false if it is not
+ * (e.g., \p func was not registered).
+ *
+ * \note As with #dr_unregister_bb_event(), unregistering can break the translation
+ * of blocks built while \p func was registered: DR then calls the basic block event
+ * for all of them.  Unregister only once those blocks are gone, e.g., after flushing
+ * them with dr_flush_region().
+ */
+bool
+dr_unregister_bb_filter_event(bool (*func)(void *drcontext, void *tag, app_pc end,
+                                           bool for_trace, bool translating));
+
+DR_API
+/**
  * Registers a callback function for the trace event.  DR calls \p func
  * before inserting a new trace into the code cache.  DR may call \p func
  * again if it needs to translate from code cache addresses back to

@@ -2973,6 +2973,9 @@ if (NOT ANDROID) # XXX i#1874: get working on Android
   # We want rpath on Linux so we can load the appdll.
   set_target_properties(client.null_instrument PROPERTIES SKIP_BUILD_RPATH OFF)
 endif ()
+if (LINUX AND X86 AND X64)
+  tobuild_ci(client.bb_filter client-interface/bb_filter.c "" "" "")
+endif ()
 
 if (NOT ARM) # XXX i#1551: fix bugs on ARM
   # Test passing a really long (600 chars) client option string.
