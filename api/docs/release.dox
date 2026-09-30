@@ -353,7 +353,8 @@ Further non-compatibility-affecting changes include:
    alone, for clients that need no duplication for a while, and
    drbbdup_set_enabled_func() to have a client decide that for each block.
  - Added drreg_set_enabled() to have drreg leave the basic blocks built from then on
-   alone, for clients that need no scratch registers for a while.
+   alone, for clients that need no scratch registers for a while, and
+   drreg_set_enabled_func() to have a client decide that for each block.
  - Added dr_register_bb_filter_event(), with which a client decides for each new
    basic block, from its application code, whether the basic block event is called
    for it.  DR builds the blocks that no filter passes without decoding each

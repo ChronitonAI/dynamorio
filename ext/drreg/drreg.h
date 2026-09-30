@@ -233,10 +233,42 @@ DR_EXPORT
  * (e.g., with a synchronous dr_flush_region() of all code) together with the change,
  * before any of them runs again.
  *
+ * The state applies to all threads, and drreg takes it in its analysis phase for a
+ * block. To decide for each block instead, use drreg_set_enabled_func(): calling this
+ * routine from a basic block event, for the block at hand, is not safe while other
+ * threads can build blocks or translate their state (DR builds the blocks for the code
+ * cache one at a time, with thread-shared caches or while a module load event is
+ * registered, as drmgr does, but it re-creates blocks to translate a thread's state
+ * without waiting for other threads' builds).
+ *
  * @return whether successful or an error code on failure.
  */
 drreg_status_t
 drreg_set_enabled(bool enable);
+
+DR_EXPORT
+/**
+ * Sets a call-back function that decides for each basic block whether drreg processes
+ * it, for all of drreg's users, or removes the function if \p func is NULL. While a
+ * function is set, drreg processes a block only if it is enabled (see
+ * drreg_set_enabled()) and \p func returns true for the block, and leaves the other
+ * blocks alone, as while it is disabled.
+ *
+ * drreg calls \p func in its analysis phase for the block, with the arguments of the
+ * basic block event (see dr_register_bb_event()), both when the block is built and when
+ * DR re-creates it to translate a fault or signal inside it (\p translating is then
+ * true), and \p func must return the same value in both cases. Unlike a change made
+ * with drreg_set_enabled(), the decision is thus made per block, even while other
+ * threads build blocks or translate their state, and needs no flush as long as \p func
+ * keeps deciding the same for each existing block. For instance, a client that keeps a
+ * separate copy of the code for each of its modes of execution can decide from the mode
+ * that a block is built for.
+ *
+ * @return whether successful or an error code on failure.
+ */
+drreg_status_t
+drreg_set_enabled_func(bool (*func)(void *drcontext, void *tag, bool for_trace,
+                                    bool translating));
 
 DR_EXPORT
 /**
