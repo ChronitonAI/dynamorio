@@ -65,7 +65,7 @@ coarse_stubs_free(void);
 
 static fragment_t *
 fragment_link_lookup_same_sharing(dcontext_t *dcontext, app_pc tag, linkstub_t *last_exit,
-                                  uint flags);
+                                  uint flags, uint variant);
 
 static void
 link_new_coarse_grain_fragment(dcontext_t *dcontext, fragment_t *f);
@@ -615,7 +615,9 @@ last_exit_deleted(dcontext_t *dcontext)
     ASSERT(dcontext->last_fragment->flags != HEAP_UNALLOCATED_UINT);
     ASSERT(dcontext->last_fragment->id != HEAP_UNALLOCATED_UINT);
 #endif
-    ldata->linkstub_deleted_fragment.flags = dcontext->last_fragment->flags;
+    /* The copy has no fragment variant field before it (see FRAGMENT_VARIANT()). */
+    ldata->linkstub_deleted_fragment.flags =
+        dcontext->last_fragment->flags & ~FRAG_HAS_VARIANT;
     DODEBUG({ ldata->linkstub_deleted_fragment.id = dcontext->last_fragment->id; });
 
     /* Store which exit this is, for trace building.
@@ -1101,6 +1103,14 @@ is_linkable(dcontext_t *dcontext, fragment_t *from_f, linkstub_t *from_l,
      */
     if ((from_f->flags & FRAG_SHARED) != (to_f->flags & FRAG_SHARED))
         return false;
+    /* Nor between fragment variants: we look up link targets in the source's
+     * variant, so this should never happen.
+     */
+    if (TESTANY(FRAG_HAS_VARIANT, from_f->flags | to_f->flags) &&
+        FRAGMENT_VARIANT(from_f) != FRAGMENT_VARIANT(to_f)) {
+        ASSERT_NOT_REACHED();
+        return false;
+    }
 #ifdef DGC_DIAGNOSTICS
     /* restrict linking so we can study entry/exit behavior */
     if ((from_f->flags & FRAG_DYNGEN) != (to_f->flags & FRAG_DYNGEN))
@@ -1341,7 +1351,9 @@ incoming_remove_link_nosearch(dcontext_t *dcontext, fragment_t *f, linkstub_t *l
                     targetf->tag);
                 ASSERT(!LINKSTUB_FAKE(l));
                 DODEBUG({ ((future_fragment_t *)targetf)->incoming_stubs = NULL; });
-                fragment_delete_future(dcontext, (future_fragment_t *)targetf);
+                /* targetf is in the tables of f's variant. */
+                fragment_delete_future(dcontext, (future_fragment_t *)targetf,
+                                       FRAGMENT_VARIANT(f));
                 /* WARNING: do not reference targetf after this */
                 STATS_INC(num_trace_private_fut_del);
                 return;
@@ -1471,12 +1483,15 @@ add_private_check_shared(dcontext_t *dcontext, fragment_t *f, linkstub_t *l)
     ASSERT(!TESTANY(FRAG_SHARED, f->flags));
     ASSERT(!SHARED_FRAGMENTS_ENABLED() || dynamo_exited ||
            self_owns_recursive_lock(&change_linking_lock));
-    targetf = fragment_link_lookup_same_sharing(dcontext, target_tag, l, FRAG_SHARED);
-    if (targetf == NULL)
-        targetf = (fragment_t *)fragment_lookup_future(dcontext, target_tag);
+    targetf = fragment_link_lookup_same_sharing(dcontext, target_tag, l, FRAG_SHARED,
+                                                FRAGMENT_VARIANT(f));
     if (targetf == NULL) {
-        targetf = (fragment_t *)fragment_create_and_add_future(dcontext, target_tag,
-                                                               FRAG_SHARED);
+        targetf = (fragment_t *)fragment_lookup_future(dcontext, target_tag,
+                                                       FRAGMENT_VARIANT(f));
+    }
+    if (targetf == NULL) {
+        targetf = (fragment_t *)fragment_create_and_add_future(
+            dcontext, target_tag, FRAG_SHARED, FRAGMENT_VARIANT(f));
     }
 
     if (!TESTANY(FRAG_IS_TRACE_HEAD, targetf->flags)) {
@@ -1507,10 +1522,11 @@ add_future_incoming(dcontext_t *dcontext, fragment_t *f, linkstub_t *l)
     ASSERT(!SHARED_FRAGMENTS_ENABLED() || !dynamo_exited ||
            self_owns_recursive_lock(&change_linking_lock));
     ASSERT(linkstub_owned_by_fragment(dcontext, f, l));
-    if (!TESTANY(FRAG_SHARED, f->flags))
-        targetf = fragment_lookup_private_future(dcontext, target_tag);
-    else
-        targetf = fragment_lookup_future(dcontext, target_tag);
+    if (!TESTANY(FRAG_SHARED, f->flags)) {
+        targetf =
+            fragment_lookup_private_future(dcontext, target_tag, FRAGMENT_VARIANT(f));
+    } else
+        targetf = fragment_lookup_future(dcontext, target_tag, FRAGMENT_VARIANT(f));
     if (targetf == NULL) {
         /* if private, lookup-and-add being atomic is not an issue;
          * for shared, the change_linking_lock atomicizes for us
@@ -1521,7 +1537,7 @@ add_future_incoming(dcontext_t *dcontext, fragment_t *f, linkstub_t *l)
              * know to remove this future later
              * if never used
              */
-            (f->flags & (FRAG_SHARED | FRAG_TEMP_PRIVATE)));
+            (f->flags & (FRAG_SHARED | FRAG_TEMP_PRIVATE)), FRAGMENT_VARIANT(f));
     }
     add_to_incoming_list(dcontext, f, l, (fragment_t *)targetf, false);
 
@@ -1574,6 +1590,8 @@ incoming_remove_fragment(dcontext_t *dcontext, fragment_t *f)
     /* if removing shared trace, move its links back to the shadowed shared trace head */
     /* flags not preserved for coarse so we have to check all coarse bbs */
     if (TESTANY(FRAG_TRACE_LINKS_SHIFTED | FRAG_COARSE_GRAIN, f->flags)) {
+        /* Traces and coarse-grain units are not supported with fragment variants. */
+        ASSERT(fragment_num_variants() == 1);
         if (TESTANY(FRAG_IS_TRACE, f->flags)) {
             fragment_t wrapper;
             /* XXX case 8600: provide single lookup routine here */
@@ -1632,9 +1650,9 @@ incoming_remove_fragment(dcontext_t *dcontext, fragment_t *f)
             if (target_tag == f->tag)
                 targetf = f;
             else {
-                /* only want fragments in same shared/private cache */
-                targetf = fragment_link_lookup_same_sharing(dcontext, target_tag, NULL,
-                                                            f->flags);
+                /* only want fragments in same shared/private cache and variant */
+                targetf = fragment_link_lookup_same_sharing(
+                    dcontext, target_tag, NULL, f->flags, FRAGMENT_VARIANT(f));
                 if (targetf == NULL) {
                     /* don't worry, all routines can handle fragment_t* that is really
                      * future_fragment_t*
@@ -1642,10 +1660,10 @@ incoming_remove_fragment(dcontext_t *dcontext, fragment_t *f)
                     /* make sure future is in proper shared/private table */
                     if (!TESTANY(FRAG_SHARED, f->flags)) {
                         targetf = (fragment_t *)fragment_lookup_private_future(
-                            dcontext, target_tag);
+                            dcontext, target_tag, FRAGMENT_VARIANT(f));
                     } else {
-                        targetf =
-                            (fragment_t *)fragment_lookup_future(dcontext, target_tag);
+                        targetf = (fragment_t *)fragment_lookup_future(
+                            dcontext, target_tag, FRAGMENT_VARIANT(f));
                     }
                 }
             }
@@ -1675,10 +1693,12 @@ incoming_remove_fragment(dcontext_t *dcontext, fragment_t *f)
     LOG(THREAD, LOG_LINKS, 4, "    adding future fragment for deleted F%d(" PFX ")\n",
         f->id, f->tag);
     DOCHECK(1, {
-        if (TESTANY(FRAG_SHARED, f->flags))
-            ASSERT(fragment_lookup_future(dcontext, f->tag) == NULL);
-        else
-            ASSERT(fragment_lookup_private_future(dcontext, f->tag) == NULL);
+        if (TESTANY(FRAG_SHARED, f->flags)) {
+            ASSERT(fragment_lookup_future(dcontext, f->tag, FRAGMENT_VARIANT(f)) == NULL);
+        } else {
+            ASSERT(fragment_lookup_private_future(dcontext, f->tag,
+                                                  FRAGMENT_VARIANT(f)) == NULL);
+        }
     });
     future = fragment_create_and_add_future(
         dcontext, f->tag,
@@ -1687,7 +1707,7 @@ incoming_remove_fragment(dcontext_t *dcontext, fragment_t *f)
          * there was a real future here before the private, so our
          * future removal optimization does not apply.
          */
-        (FRAG_SHARED & f->flags) | FRAG_WAS_DELETED);
+        (FRAG_SHARED & f->flags) | FRAG_WAS_DELETED, FRAGMENT_VARIANT(f));
 
     future->incoming_stubs = f->in_xlate.incoming_stubs;
     DODEBUG({ f->in_xlate.incoming_stubs = NULL; });
@@ -1791,8 +1811,10 @@ link_fragment_outgoing(dcontext_t *dcontext, fragment_t *f, bool new_fragment)
             /* f may be invisible, so explicitly check for self-loops */
             if (target_tag == f->tag)
                 g = f;
-            else /* primarily interested in fragment of same sharing */
-                g = fragment_link_lookup_same_sharing(dcontext, target_tag, l, f->flags);
+            else { /* primarily interested in fragment of same sharing and variant */
+                g = fragment_link_lookup_same_sharing(dcontext, target_tag, l, f->flags,
+                                                      FRAGMENT_VARIANT(f));
+            }
             if (g != NULL) {
                 if (is_linkable(dcontext, f, l, g,
                                 NEED_SHARED_LOCK(f->flags) ||
@@ -1925,9 +1947,9 @@ link_new_fragment(dcontext_t *dcontext, fragment_t *f)
 
     /* transfer existing future incoming links to this fragment */
     if (!TESTANY(FRAG_SHARED, f->flags))
-        future = fragment_lookup_private_future(dcontext, f->tag);
+        future = fragment_lookup_private_future(dcontext, f->tag, FRAGMENT_VARIANT(f));
     else
-        future = fragment_lookup_future(dcontext, f->tag);
+        future = fragment_lookup_future(dcontext, f->tag, FRAGMENT_VARIANT(f));
     if (future != NULL) {
         uint futflags = future->flags;
         LOG(THREAD, LOG_LINKS, 4,
@@ -1967,13 +1989,15 @@ link_new_fragment(dcontext_t *dcontext, fragment_t *f)
                 f->id, f->tag);
             f->flags &= ~FRAG_IS_TRACE_HEAD;
         }
-        fragment_delete_future(dcontext, future);
+        fragment_delete_future(dcontext, future, FRAGMENT_VARIANT(f));
     }
     DOCHECK(1, {
-        if (TESTANY(FRAG_SHARED, f->flags))
-            ASSERT(fragment_lookup_future(dcontext, f->tag) == NULL);
-        else
-            ASSERT(fragment_lookup_private_future(dcontext, f->tag) == NULL);
+        if (TESTANY(FRAG_SHARED, f->flags)) {
+            ASSERT(fragment_lookup_future(dcontext, f->tag, FRAGMENT_VARIANT(f)) == NULL);
+        } else {
+            ASSERT(fragment_lookup_private_future(dcontext, f->tag,
+                                                  FRAGMENT_VARIANT(f)) == NULL);
+        }
     });
 
     /* link incoming branches first, so no conflicts w/ self-loops
@@ -2052,10 +2076,10 @@ shift_links_to_new_fragment(dcontext_t *dcontext, fragment_t *old_f, fragment_t 
     } else {
         for (l = FRAGMENT_EXIT_STUBS(old_f); l; l = LINKSTUB_NEXT_EXIT(l)) {
             if (LINKSTUB_DIRECT(l->flags)) {
-                /* incoming links do not cross sharedness boundaries */
+                /* incoming links do not cross sharedness or variant boundaries */
                 app_pc target_tag = EXIT_TARGET_TAG(dcontext, old_f, l);
                 fragment_t *targetf = fragment_link_lookup_same_sharing(
-                    dcontext, target_tag, l, old_f->flags);
+                    dcontext, target_tag, l, old_f->flags, FRAGMENT_VARIANT(old_f));
                 if (targetf == NULL) {
                     /* don't worry, all routines can handle fragment_t* that is really
                      * future_fragment_t*
@@ -2063,10 +2087,10 @@ shift_links_to_new_fragment(dcontext_t *dcontext, fragment_t *old_f, fragment_t 
                     /* make sure future is in proper shared/private table */
                     if (!TESTANY(FRAG_SHARED, old_f->flags)) {
                         targetf = (fragment_t *)fragment_lookup_private_future(
-                            dcontext, target_tag);
+                            dcontext, target_tag, FRAGMENT_VARIANT(old_f));
                     } else {
-                        targetf =
-                            (fragment_t *)fragment_lookup_future(dcontext, target_tag);
+                        targetf = (fragment_t *)fragment_lookup_future(
+                            dcontext, target_tag, FRAGMENT_VARIANT(old_f));
                     }
                 }
                 ASSERT(targetf != NULL);
@@ -2649,9 +2673,12 @@ fragment_coarse_link_wrapper(dcontext_t *dcontext, app_pc target_tag,
     return NULL;
 }
 
+/* Links never cross fragment variants, so callers pass the variant of the
+ * fragment being linked.
+ */
 static fragment_t *
 fragment_link_lookup_same_sharing(dcontext_t *dcontext, app_pc tag, linkstub_t *last_exit,
-                                  uint flags)
+                                  uint flags, uint variant)
 {
     /* Assumption: if asking for private won't use temp_targetf.
      * Else need to grab the lock when linking private fragments
@@ -2660,7 +2687,7 @@ fragment_link_lookup_same_sharing(dcontext_t *dcontext, app_pc tag, linkstub_t *
     ASSERT(!TESTANY(FRAG_SHARED, flags) ||
            self_owns_recursive_lock(&change_linking_lock));
     return fragment_lookup_fine_and_coarse_sharing(dcontext, tag, &temp_targetf,
-                                                   last_exit, flags);
+                                                   last_exit, flags, variant);
 }
 
 static void
@@ -2738,7 +2765,8 @@ coarse_link_direct(dcontext_t *dcontext, fragment_t *f, linkstub_t *l,
      * fine tables
      */
     ASSERT(TESTANY(FRAG_SHARED, f->flags));
-    target_f = fragment_lookup_same_sharing(dcontext, target_tag, FRAG_SHARED);
+    /* Coarse-grain units are not supported with fragment variants. */
+    target_f = fragment_lookup_same_sharing(dcontext, target_tag, FRAG_SHARED, 0);
     if (target_f == NULL) {
         if (local_tgt_in == NULL) {
             /* Use src_info if available -- else look up by tag */
@@ -2871,7 +2899,7 @@ link_new_coarse_grain_fragment(dcontext_t *dcontext, fragment_t *f)
     ASSERT(TESTALL(FRAG_COARSE_GRAIN | FRAG_SHARED, f->flags));
 
     /* Transfer existing fine-grained future incoming links to this fragment */
-    future = fragment_lookup_future(dcontext, f->tag); /* shared only */
+    future = fragment_lookup_future(dcontext, f->tag, 0); /* shared only */
     if (future != NULL) {
         uint futflags = future->flags;
         LOG(THREAD, LOG_LINKS, 4,
@@ -2902,9 +2930,9 @@ link_new_coarse_grain_fragment(dcontext_t *dcontext, fragment_t *f)
             link_fragment_incoming(dcontext, f, true /*new*/);
         }
 
-        fragment_delete_future(dcontext, future);
+        fragment_delete_future(dcontext, future, 0);
     }
-    ASSERT(fragment_lookup_future(dcontext, f->tag) == NULL);
+    ASSERT(fragment_lookup_future(dcontext, f->tag, 0) == NULL);
 
     /* There is no proactive linking from coarse-grain fragments: it's
      * all done lazily, so there are no records of who wanted to link
@@ -3131,7 +3159,8 @@ coarse_remove_outgoing(dcontext_t *dcontext, cache_pc stub, coarse_info_t *src_i
 {
     cache_pc target_tag = entrance_stub_target_tag(stub, src_info);
     /* ASSUMPTION: coarse-grain are always shared and cannot target private */
-    fragment_t *targetf = fragment_lookup_same_sharing(dcontext, target_tag, FRAG_SHARED);
+    fragment_t *targetf =
+        fragment_lookup_same_sharing(dcontext, target_tag, FRAG_SHARED, 0);
     ASSERT(entrance_stub_linked(stub, src_info));
     if (targetf != NULL) {
         /* targeting a real fragment_t */
@@ -3268,13 +3297,13 @@ coarse_unit_unlink(dcontext_t *dcontext, coarse_info_t *info)
             }
             /* Ensure we shifted links properly to traces replacing coarse heads */
             ASSERT(fragment_lookup_trace(dcontext, tgt) == NULL);
-            future = fragment_lookup_future(dcontext, tgt);
+            future = fragment_lookup_future(dcontext, tgt, 0);
             if (future == NULL) {
                 LOG(THREAD, LOG_LINKS, 4,
                     "    adding future fragment for removed coarse target " PFX "\n",
                     tgt);
-                future = fragment_create_and_add_future(dcontext, tgt,
-                                                        FRAG_SHARED | FRAG_WAS_DELETED);
+                future = fragment_create_and_add_future(
+                    dcontext, tgt, FRAG_SHARED | FRAG_WAS_DELETED, 0);
                 future->incoming_stubs = e->in.fine_l;
             } else {
                 /* It's possible to have multiple incoming entries here for later-linked
@@ -3671,7 +3700,8 @@ coarse_update_outgoing(dcontext_t *dcontext, cache_pc old_stub, cache_pc new_stu
 {
     cache_pc target_tag = entrance_stub_target_tag(new_stub, src_info);
     /* ASSUMPTION: coarse-grain are always shared and cannot target private */
-    fragment_t *targetf = fragment_lookup_same_sharing(dcontext, target_tag, FRAG_SHARED);
+    fragment_t *targetf =
+        fragment_lookup_same_sharing(dcontext, target_tag, FRAG_SHARED, 0);
     DOCHECK(CHKLVL_DEFAULT + 1,
             { /* PR 307698: perf hit */
               ASSERT(entrance_stub_linked(new_stub, NULL /*may not point to src_info*/));

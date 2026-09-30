@@ -464,10 +464,13 @@ rseq_process_entry(struct rseq_cs *entry, ssize_t load_offs)
     rseq_analyze_instructions(info);
     vmvector_add(d_r_rseq_areas, info->start, info->end, (void *)info);
     RSTATS_INC(num_rseq_regions);
-    /* Check the start pc.  We don't take the effort to check for non-tags or
-     * interior pc's.
+    /* Check the start pc, in every fragment variant.  We don't take the effort
+     * to check for non-tags or interior pc's.
      */
-    if (fragment_lookup(GLOBAL_DCONTEXT, info->start) != NULL) {
+    bool found = false;
+    for (uint v = 0; v < fragment_num_variants() && !found; v++)
+        found = fragment_lookup_variant(GLOBAL_DCONTEXT, info->start, v) != NULL;
+    if (found) {
         /* We rely on the app not running rseq code for non-rseq purposes (since we
          * can't easily tell the difference; plus we avoid a flush for lazy rseq
          * activation).

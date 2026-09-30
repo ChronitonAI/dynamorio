@@ -154,6 +154,17 @@
 
 #define INLINE_ONCE inline
 
+/* INLINE_FORCED (from globals_api.h, which clients use as well) is only a hint for
+ * gcc and clang.  INLINE_ALWAYS forces inlining with all compilers, for DR's own
+ * routines whose performance depends on it, e.g., to specialize a routine for
+ * constant arguments at some of its call sites.
+ */
+#ifdef WINDOWS
+#    define INLINE_ALWAYS INLINE_FORCED
+#else
+#    define INLINE_ALWAYS inline __attribute__((always_inline))
+#endif
+
 #ifndef LINUX_KERNEL
 #    include <stdlib.h>
 #    include <stdio.h>
@@ -894,6 +905,11 @@ struct _dcontext_t {
     void *monitor_field;
     void *fcache_field;
     void *fragment_field;
+    /* The per_thread_t whose indirect branch target tables the lookup routines
+     * use when the tables are not in TLS: fragment_field, or with
+     * -num_fragment_variants the container of the current variant's tables.
+     */
+    void *fragment_ibt_field;
     void *heap_field;
     void *vm_areas_field;
     void *os_field;

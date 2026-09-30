@@ -1379,7 +1379,8 @@ end_and_emit_trace(dcontext_t *dcontext, fragment_t *cur_f)
     }
     /* remove private trace head fragment, if any */
     if (trace_head_f == NULL) /* from cur_f */
-        trace_head_f = fragment_lookup_same_sharing(dcontext, tag, 0 /*FRAG_PRIVATE*/);
+        trace_head_f = fragment_lookup_same_sharing(dcontext, tag, 0 /*FRAG_PRIVATE*/,
+                                                    fragment_current_variant(dcontext));
     /* We do not go through other threads and delete their private trace heads,
      * presuming that they have them for a reason and don't want this shared trace
      */
@@ -1411,8 +1412,9 @@ end_and_emit_trace(dcontext_t *dcontext, fragment_t *cur_f)
     }
     /* find shared trace head fragment, if any */
     if (DYNAMO_OPTION(shared_bbs)) {
-        trace_head_f = fragment_lookup_fine_and_coarse_sharing(dcontext, tag, &wrapper,
-                                                               NULL, FRAG_SHARED);
+        trace_head_f = fragment_lookup_fine_and_coarse_sharing(
+            dcontext, tag, &wrapper, NULL, FRAG_SHARED,
+            fragment_current_variant(dcontext));
         if (!TESTANY(FRAG_SHARED, md->trace_flags)) {
             /* trace is private, so we can emit as a shadow of trace head */
         } else if (trace_head_f != NULL) {

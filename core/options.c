@@ -1243,6 +1243,61 @@ static bool
 check_option_compatibility_helper(int recurse_count)
 {
     bool changed_options = false;
+    /* Fragment variants.  We check these first: disabling traces turns on
+     * -bb_ibl_targets, without which the checks below would drop
+     * -shared_bb_ibt_tables before we can refuse it.  As in release builds, we only
+     * report incompatible settings and fix them, without asserting.
+     */
+#    if !defined(X86) || !defined(LINUX)
+    if (DYNAMO_OPTION(num_fragment_variants) > 1) {
+        /* Not implemented or tested elsewhere yet. */
+        SYSLOG_INTERNAL_ERROR("-num_fragment_variants is only supported on x86 Linux: "
+                              "disabling");
+        dynamo_options.num_fragment_variants = 1;
+        changed_options = true;
+    }
+#    endif
+    if (DYNAMO_OPTION(num_fragment_variants) < 1 ||
+        DYNAMO_OPTION(num_fragment_variants) > MAX_FRAGMENT_VARIANTS) {
+        SYSLOG_INTERNAL_ERROR("-num_fragment_variants must be between 1 and %d",
+                              MAX_FRAGMENT_VARIANTS);
+        dynamo_options.num_fragment_variants =
+            DYNAMO_OPTION(num_fragment_variants) < 1 ? 1 : MAX_FRAGMENT_VARIANTS;
+        changed_options = true;
+    }
+    if (DYNAMO_OPTION(num_fragment_variants) > 1) {
+        /* Traces, coarse-grain units, thread-shared ibt tables, and ibl heads
+         * inlined into exit stubs are not supported with fragment variants.
+         * Traces are on by default, so we silently turn them off (as documented
+         * for the option and at dr_get_num_fragment_variants()).
+         */
+        if (!DYNAMO_OPTION(disable_traces)) {
+            LOG(GLOBAL, LOG_TOP, 1, "-num_fragment_variants disables traces\n");
+            DISABLE_TRACES((&dynamo_options));
+            changed_options = true;
+        }
+        if (DYNAMO_OPTION(coarse_units)) {
+            SYSLOG_INTERNAL_ERROR("-coarse_units is incompatible with "
+                                  "-num_fragment_variants: disabling");
+            DISABLE_COARSE_UNITS((&dynamo_options));
+            changed_options = true;
+        }
+        if (DYNAMO_OPTION(shared_bb_ibt_tables) ||
+            DYNAMO_OPTION(shared_trace_ibt_tables)) {
+            SYSLOG_INTERNAL_ERROR("shared ibt tables are incompatible with "
+                                  "-num_fragment_variants: disabling");
+            dynamo_options.shared_bb_ibt_tables = false;
+            dynamo_options.shared_trace_ibt_tables = false;
+            changed_options = true;
+        }
+        if (DYNAMO_OPTION(inline_bb_ibl) || DYNAMO_OPTION(inline_trace_ibl)) {
+            SYSLOG_INTERNAL_ERROR("inlined ibl is incompatible with "
+                                  "-num_fragment_variants: disabling");
+            dynamo_options.inline_bb_ibl = false;
+            dynamo_options.inline_trace_ibl = false;
+            changed_options = true;
+        }
+    }
 #    if defined(AARCH64) || defined(RISCV64)
     if (!DYNAMO_OPTION(bb_prefixes)) {
         USAGE_ERROR("bb_prefixes must be true on AArch64/RISCV64");

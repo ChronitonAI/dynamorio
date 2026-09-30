@@ -2941,6 +2941,15 @@ if (LINUX AND X86 AND X64)
   torunonly_ci(client.flush_exact-thread_private client.flush_exact
     client.flush_exact.dll client-interface/flush_exact.c "" "-thread_private" "")
 endif ()
+if (X86 AND X64 AND LINUX) # The app and client use x86-64 asm and registers.
+  tobuild_ci(client.fragment_variants client-interface/fragment_variants.c ""
+    "-num_fragment_variants 3" "")
+  link_with_pthread(client.fragment_variants)
+  set(client.fragment_variants.thread_private_expectbase "fragment_variants")
+  torunonly_ci(client.fragment_variants.thread_private client.fragment_variants
+    client.fragment_variants.dll client-interface/fragment_variants.c "-unlink_flush"
+    "-num_fragment_variants 3 -thread_private" "")
+endif ()
 if (X86 OR AARCH64) # XXX i#1551: port asm to ARM
   tobuild_ci(client.strace client-interface/strace.c "" "" "")
   use_DynamoRIO_extension(client.strace.dll drmgr)

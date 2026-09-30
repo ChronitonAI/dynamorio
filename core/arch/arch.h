@@ -221,7 +221,7 @@ mixed_mode_enabled(void)
 #define THREAD_RECORD_OFFSET ((PROT_OFFS) + offsetof(dcontext_t, thread_record))
 #define WHEREAMI_OFFSET ((PROT_OFFS) + offsetof(dcontext_t, whereami))
 
-#define FRAGMENT_FIELD_OFFSET ((PROT_OFFS) + offsetof(dcontext_t, fragment_field))
+#define FRAGMENT_IBT_FIELD_OFFSET ((PROT_OFFS) + offsetof(dcontext_t, fragment_ibt_field))
 #define PRIVATE_CODE_OFFSET ((PROT_OFFS) + offsetof(dcontext_t, private_code))
 
 #ifdef WINDOWS
@@ -857,7 +857,7 @@ typedef struct patch_entry_t {
         size_t offset;  /* offset in instruction stream */
     } where;
     ptr_uint_t value_location_offset; /* location containing value to be updated */
-    /* offset from dcontext->fragment_field (usually pt->trace.field),
+    /* offset from dcontext->fragment_ibt_field (usually pt->trace.field),
      * or an absolute address */
     ushort patch_flags; /* whether to use the address of location or its value */
     short instr_offset; /* desired offset within instruction,

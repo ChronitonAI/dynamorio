@@ -2148,24 +2148,28 @@ fcache_thread_init(dcontext_t *dcontext)
     fcache_thread_reset_init(dcontext);
 }
 
-/* see if a fragment with that tag has existed, ever, in any cache */
+/* see if a fragment with that tag has existed, ever, in any cache (of the
+ * current fragment variant)
+ */
 bool
 fragment_lookup_deleted(dcontext_t *dcontext, app_pc tag)
 {
     future_fragment_t *fut;
+    uint variant = fragment_current_variant(dcontext);
     if (SHARED_FRAGMENTS_ENABLED() && dcontext != GLOBAL_DCONTEXT) {
-        fut = fragment_lookup_private_future(dcontext, tag);
+        fut = fragment_lookup_private_future(dcontext, tag, variant);
         if (fut != NULL)
             return TESTANY(FRAG_WAS_DELETED, fut->flags);
         /* if no private, lookup shared */
     }
-    fut = fragment_lookup_future(dcontext, tag);
+    fut = fragment_lookup_future(dcontext, tag, variant);
     return (fut != NULL && TESTANY(FRAG_WAS_DELETED, fut->flags));
 }
 
-/* find a fragment that existed in the same type of cache */
+/* find a fragment that existed in the same type of cache and fragment variant */
 static future_fragment_t *
-fragment_lookup_cache_deleted(dcontext_t *dcontext, fcache_t *cache, app_pc tag)
+fragment_lookup_cache_deleted(dcontext_t *dcontext, fcache_t *cache, app_pc tag,
+                              uint variant)
 {
     future_fragment_t *fut;
     if (!cache->is_shared) {
@@ -2173,9 +2177,9 @@ fragment_lookup_cache_deleted(dcontext_t *dcontext, fcache_t *cache, app_pc tag)
          * cache needs to be resized, and thus only if we kicked tag out of
          * this cache, not whether we kicked it out of the shared cache
          */
-        fut = fragment_lookup_private_future(dcontext, tag);
+        fut = fragment_lookup_private_future(dcontext, tag, variant);
     } else
-        fut = fragment_lookup_future(dcontext, tag);
+        fut = fragment_lookup_future(dcontext, tag, variant);
     if (fut != NULL && TESTANY(FRAG_WAS_DELETED, fut->flags))
         return fut;
     else
@@ -2725,7 +2729,8 @@ place_fragment(dcontext_t *dcontext, fragment_t *f, fcache_unit_t *unit,
          * may have replaced the future?  xref case 7151, though that
          * should be a problem for private as well...
          */
-        future_fragment_t *fut = fragment_lookup_cache_deleted(dcontext, cache, f->tag);
+        future_fragment_t *fut =
+            fragment_lookup_cache_deleted(dcontext, cache, f->tag, FRAGMENT_VARIANT(f));
         ASSERT(!USE_FIFO_FOR_CACHE(cache));
         ASSERT(!cache->is_coarse);
         cache->num_replaced++; /* simply number created past record_wset point */
@@ -2897,7 +2902,8 @@ replace_fragments(dcontext_t *dcontext, fcache_t *cache, fcache_unit_t *unit,
     fifo_append(cache, f);
 
     if (cache->finite_cache && cache->num_replaced > 0) {
-        future_fragment_t *fut = fragment_lookup_cache_deleted(dcontext, cache, f->tag);
+        future_fragment_t *fut =
+            fragment_lookup_cache_deleted(dcontext, cache, f->tag, FRAGMENT_VARIANT(f));
         ASSERT(cache->finite_cache && cache->replace_param > 0);
         if (fut != NULL) {
             cache->num_regenerated++;

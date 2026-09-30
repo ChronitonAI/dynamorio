@@ -2482,6 +2482,10 @@ DR_API
  * be the drcontext used to create the instruction list.
  * This routine may not be called from the thread exit event.
  *
+ * \note With more than one fragment variant (see dr_get_num_fragment_variants()),
+ * this routine acts on the fragment of the current variant of the thread of \p
+ * drcontext only.
+ *
  * \return false if the fragment does not exist and true otherwise.
  */
 bool
@@ -2505,6 +2509,10 @@ DR_API
  *
  * \note Other options of removing the code fragments from code cache include
  * dr_flush_region(), dr_unlink_flush_region(), and dr_delay_flush_region().
+ *
+ * \note With more than one fragment variant (see dr_get_num_fragment_variants()),
+ * this routine acts on the fragment of the current variant of the thread of \p
+ * drcontext only.
  *
  * \return false if the fragment does not exist and true otherwise.
  */
@@ -2666,7 +2674,8 @@ dr_unlink_flush_region_ex(app_pc start, size_t size, dr_flush_flags_t flags);
 DR_API
 /**
  * Flushes the fragments whose tag is \p tag: the basic block and the trace that start
- * at \p tag, both thread-shared ones and those private to any thread.  Fragments that
+ * at \p tag, both thread-shared ones and those private to any thread, in every
+ * fragment variant (see dr_get_num_fragment_variants()).  Fragments that
  * merely contain the code at \p tag are not flushed, and neither is any other
  * fragment: in particular, neither are the fragments built from nearby code, which
  * a region flush (see dr_unlink_flush_region()) also flushes.  Like
@@ -2727,13 +2736,23 @@ dr_delay_flush_region_ex(app_pc start, size_t size, dr_flush_flags_t flags, uint
                          void (*flush_completion_callback)(int flush_id));
 
 DR_API
-/** Returns whether or not there is a fragment in code cache with tag \p tag. */
+/**
+ * Returns whether or not there is a fragment in code cache with tag \p tag.
+ *
+ * \note With more than one fragment variant (see dr_get_num_fragment_variants()),
+ * this routine only considers the fragments of the current variant of the thread
+ * of \p drcontext.
+ */
 bool
 dr_fragment_exists_at(void *drcontext, void *tag);
 
 DR_API
 /**
  * Returns true if a basic block with tag \p tag exists in the code cache.
+ *
+ * \note With more than one fragment variant (see dr_get_num_fragment_variants()),
+ * this routine only considers the fragments of the current variant of the thread
+ * of \p drcontext.
  */
 bool
 dr_bb_exists_at(void *drcontext, void *tag);
@@ -2743,6 +2762,10 @@ DR_API
  * Looks up the fragment with tag \p tag.
  * If not found, returns 0.
  * If found, returns the total size occupied in the cache by the fragment.
+ *
+ * \note With more than one fragment variant (see dr_get_num_fragment_variants()),
+ * this routine only considers the fragments of the current variant of the thread
+ * of \p drcontext.
  */
 uint
 dr_fragment_size(void *drcontext, void *tag);
@@ -2836,6 +2859,119 @@ bool
 dr_get_stats(dr_stats_t *drstats);
 
 /****************************************************************************
+ * FRAGMENT VARIANTS
+ */
+
+DR_API
+/**
+ * Returns the number of fragment variants, which the runtime option
+ * -num_fragment_variants sets (1 by default).
+ *
+ * With more than one variant, DR keeps a separate set of code cache fragments,
+ * with their own lookup tables and links, for each variant.  A client can thus
+ * build and instrument the same application code differently in each variant,
+ * for instance to implement instrumentation modes that it switches threads
+ * between without flushing any code (see dr_select_thread_fragment_variant()).
+ * Each thread executes the fragments of one variant at a time, its current
+ * variant, and a block is built in a variant the first time a thread executes
+ * it in that variant.  The basic block event is thus called once for each
+ * variant in which a block is built, and dr_get_fragment_variant() tells it
+ * which one.  Direct branches are only linked to fragments of the same variant,
+ * and a thread's indirect branch lookups only find fragments of its current
+ * variant.  A new thread starts in variant 0.
+ *
+ * Flushing a region, whether requested with dr_flush_region(),
+ * dr_unlink_flush_region(), dr_delay_flush_region(), their _ex versions (also
+ * with #DR_FLUSH_EXACT) or dr_app_memory_changed(), or done by DR itself for
+ * modified or unmapped code, removes the fragments of every variant, and so does
+ * dr_unlink_flush_fragment().
+ * Queries and changes by tag, such as dr_fragment_exists_at() or
+ * dr_delete_fragment(), refer to the current variant of the thread of the
+ * passed-in drcontext.  The fragment deletion event, the restore state events
+ * and the signal event report the variant of the fragment concerned: see
+ * dr_get_fragment_variant() and the \p variant field of
+ * #dr_fault_fragment_info_t.
+ *
+ * With more than one variant, DR disables traces (as with -disable_traces), so
+ * the trace events are never called, and it does not support -coarse_units,
+ * thread-shared indirect branch target tables, or indirect branch lookups
+ * inlined into exit stubs.  More than one variant is currently only supported
+ * on x86 Linux: elsewhere, DR ignores the option.
+ */
+uint
+dr_get_num_fragment_variants(void);
+
+DR_API
+/**
+ * Selects \p variant as the fragment variant to which DR switches the calling
+ * thread, whose context \p drcontext must be, the next time the thread's
+ * dispatcher looks for a fragment for it to execute.  Returns false if \p
+ * variant is not less than dr_get_num_fragment_variants().  A thread cannot
+ * select another thread's variant: to switch other threads, have each of them
+ * check a shared flag at points of the client's choosing (for instance in a
+ * clean call or a system call event) and select there.
+ *
+ * The switch takes effect at the thread's next dispatch: after the thread next
+ * leaves the code cache for DR (for example for a system call that the client
+ * intercepts, so that a selection in the pre- or post-system call event applies
+ * to the code after the system call, for an indirect branch whose target is not
+ * in the thread's lookup tables, for a signal, or for a direct branch whose
+ * target has not been built in the variant yet), when a clean call or the
+ * signal event redirects execution, or at the thread's first entry into the
+ * code cache, if selected in the thread initialization event.
+ * Until then, dr_get_thread_fragment_variant() returns the previous variant.
+ * Returning from a clean call or an event into the code cache does not switch:
+ * the thread keeps executing the fragments of its previous variant, and as
+ * linked branches and indirect branch lookups only reach fragments of that
+ * variant, the switch can be delayed indefinitely, for instance in a loop.
+ *
+ * To switch immediately from a clean call, select the variant and then call
+ * dr_redirect_execution() with the application state from dr_get_mcontext()
+ * and the pc set to the application address at which to continue: execution
+ * continues there in the selected variant, building fragments as needed.  From
+ * the signal event, return #DR_SIGNAL_REDIRECT.
+ *
+ * May be called from clean calls and from the thread's event callbacks,
+ * including the thread initialization event and the basic block event, where
+ * the selection applies at the next dispatch as well (not to the block being
+ * built).
+ */
+bool
+dr_select_thread_fragment_variant(void *drcontext, uint variant);
+
+DR_API
+/**
+ * Returns the variant whose fragments the thread with context \p drcontext
+ * currently executes.  A variant that the thread selected with
+ * dr_select_thread_fragment_variant() becomes its current variant only when DR
+ * switches the thread to it.
+ */
+uint
+dr_get_thread_fragment_variant(void *drcontext);
+
+DR_API
+/**
+ * Returns the variant of the fragment that an event is being called for on the
+ * thread with context \p drcontext:
+ * - In the basic block event and the basic block filter event (see
+ *   dr_register_bb_filter_event()), the variant of the block being built: for a
+ *   new block, the thread's current variant; when DR re-creates a block to
+ *   translate a code cache address (the event's \p translating argument is
+ *   true), the variant of the fragment containing that address, which can
+ *   differ from the thread's current variant.  The events must then reproduce
+ *   the decisions and instrumentation of that variant.
+ * - In the restore state events, the variant of the fragment being translated,
+ *   which is also in the \p variant field of #dr_fault_fragment_info_t.
+ * - In the fragment deletion event, the variant of the deleted fragment.
+ *   There, \p drcontext is the event's, which is NULL for fragments deleted
+ *   outside of any thread's context (at exit or reset).
+ *
+ * Outside of these events, returns the thread's current variant.
+ */
+uint
+dr_get_fragment_variant(void *drcontext);
+
+/****************************************************************************
  * CUSTOM TRACE SUPPORT
  */
 
@@ -2878,7 +3014,13 @@ bool
 dr_trace_head_at(void *drcontext, void *tag);
 
 DR_API
-/** Checks to see that if there is a trace in the code cache at tag \p tag. */
+/**
+ * Checks to see that if there is a trace in the code cache at tag \p tag.
+ *
+ * \note With more than one fragment variant (see dr_get_num_fragment_variants()),
+ * this routine only considers the fragments of the current variant of the thread
+ * of \p drcontext.
+ */
 bool
 dr_trace_exists_at(void *drcontext, void *tag);
 

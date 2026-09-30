@@ -1979,6 +1979,7 @@ instrument_restore_nonfcache_state_prealloc(dcontext_t *dcontext, bool restore_m
     client_info.fragment_info.is_trace = false;
     client_info.fragment_info.app_code_consistent = true;
     client_info.fragment_info.ilist = NULL;
+    client_info.fragment_info.variant = 0;
     bool res = instrument_restore_state(dcontext, restore_memory, &client_info);
     dr_mcontext_to_priv_mcontext(mcontext, client_mcontext);
     return res;
@@ -7715,10 +7716,11 @@ dr_mark_trace_head(void *drcontext, void *tag)
     f = fragment_lookup_fine_and_coarse(dcontext, tag, &coarse_f, NULL);
     if (f == NULL) {
         future_fragment_t *fut;
-        fut = fragment_lookup_future(dcontext, tag);
+        fut = fragment_lookup_future(dcontext, tag, fragment_current_variant(dcontext));
         if (fut == NULL) {
             /* need to create a future fragment */
-            fut = fragment_create_and_add_future(dcontext, tag, FRAG_IS_TRACE_HEAD);
+            fut = fragment_create_and_add_future(dcontext, tag, FRAG_IS_TRACE_HEAD,
+                                                 fragment_current_variant(dcontext));
         } else {
             /* don't call mark_trace_head, it will try to do some linking */
             fut->flags |= FRAG_IS_TRACE_HEAD;
@@ -7755,7 +7757,8 @@ dr_trace_head_at(void *drcontext, void *tag)
     if (f != NULL)
         trace_head = (f->flags & FRAG_IS_TRACE_HEAD) != 0;
     else {
-        future_fragment_t *fut = fragment_lookup_future(dcontext, tag);
+        future_fragment_t *fut =
+            fragment_lookup_future(dcontext, tag, fragment_current_variant(dcontext));
         if (fut != NULL)
             trace_head = (fut->flags & FRAG_IS_TRACE_HEAD) != 0;
         else
@@ -8039,6 +8042,55 @@ bool
 dr_get_stats(dr_stats_t *drstats)
 {
     return stats_get_snapshot(drstats);
+}
+
+/***************************************************************************
+ * FRAGMENT VARIANTS
+ */
+
+DR_API
+uint
+dr_get_num_fragment_variants(void)
+{
+    return fragment_num_variants();
+}
+
+DR_API
+bool
+dr_select_thread_fragment_variant(void *drcontext, uint variant)
+{
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
+    CLIENT_ASSERT(drcontext != NULL && drcontext != GLOBAL_DCONTEXT,
+                  "dr_select_thread_fragment_variant: drcontext is invalid");
+    CLIENT_ASSERT(dcontext == get_thread_private_dcontext(),
+                  "dr_select_thread_fragment_variant: drcontext must be the calling "
+                  "thread's");
+    if (variant >= fragment_num_variants())
+        return false;
+    return fragment_select_variant(dcontext, variant);
+}
+
+DR_API
+uint
+dr_get_thread_fragment_variant(void *drcontext)
+{
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
+    CLIENT_ASSERT(drcontext != NULL && drcontext != GLOBAL_DCONTEXT,
+                  "dr_get_thread_fragment_variant: drcontext is invalid");
+    return fragment_current_variant(dcontext);
+}
+
+DR_API
+uint
+dr_get_fragment_variant(void *drcontext)
+{
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
+    CLIENT_ASSERT(drcontext != GLOBAL_DCONTEXT,
+                  "dr_get_fragment_variant: drcontext is invalid");
+    /* The fragment deletion event passes NULL for GLOBAL_DCONTEXT. */
+    if (dcontext == NULL)
+        dcontext = GLOBAL_DCONTEXT;
+    return fragment_event_variant(dcontext);
 }
 
 /***************************************************************************

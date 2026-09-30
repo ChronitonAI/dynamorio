@@ -391,6 +391,13 @@ DR_API
  * case, clients should be prepared to see duplicate tags without an
  * intermediate deletion.
  *
+ * \note With the -num_fragment_variants runtime option, a block is built
+ * separately in each fragment variant in which it executes, so clients see
+ * the same tag once per variant.  dr_get_fragment_variant() returns the
+ * variant of the block the callback is for, both for new blocks and when
+ * \p translating, and the callback must reproduce that variant's
+ * instrumentation (see dr_get_num_fragment_variants()).
+ *
  * \note A client can change the control flow of the application by
  * changing the control transfer instruction at end of the basic block.
  * If a basic block is ended with a non-control transfer instruction,
@@ -459,6 +466,12 @@ DR_API
  * \p drcontext and \p tag are as in the basic block event.  \p func can read and
  * decode the block's code (e.g., with decode_sizeof() or decode()); it must not
  * modify it.
+ *
+ * \note With the -num_fragment_variants runtime option, DR calls the filter for
+ * each variant in which it builds a block, and dr_get_fragment_variant() returns
+ * the variant of the block, also when \p translating.  The filter can decide
+ * differently in each variant, but must decide the same when translating as when
+ * the block was built in the same variant.
  */
 void
 dr_register_bb_filter_event(bool (*func)(void *drcontext, void *tag, app_pc end,
@@ -773,6 +786,13 @@ typedef struct _dr_fault_fragment_info_t {
      * cases where \p cache_start_pc is also NULL.
      */
     instrlist_t *ilist;
+    /**
+     * The fragment variant of the code fragment inside the code cache at the
+     * exception/signal/translation interruption point (see
+     * dr_get_num_fragment_variants()), which can differ from the current variant
+     * of the thread.  0 for interruption not in the code cache.
+     */
+    uint variant;
 } dr_fault_fragment_info_t;
 
 /**

@@ -4212,13 +4212,6 @@ build_bb_ilist_common(dcontext_t *dcontext, build_bb_t *bb)
             LOG(THREAD, LOG_INTERP, 3, "set fall-throught target " PFX " by client\n",
                 bb->exit_target);
         }
-        if (bb->instr != NULL && instr_opcode_valid(bb->instr) &&
-            instr_is_cbr(bb->instr) &&
-            (int)(bb->exit_target - bb->start_pc) <= SHRT_MAX &&
-            (int)(bb->exit_target - bb->start_pc) >= SHRT_MIN &&
-            /* rule out jecxz, etc. */
-            !instr_is_cti_loop(bb->instr))
-            bb->flags |= FRAG_CBR_FALLTHROUGH_SHORT;
     }
     /* we share all basic blocks except selfmod (since want no-synch quick deletion)
      * or syscall-containing ones (to bound delay on threads exiting shared cache,
@@ -5398,6 +5391,8 @@ recreate_fragment_ilist(dcontext_t *dcontext, byte *pc,
         0,
     };
     dr_isa_mode_t old_mode = DEFAULT_ISA_MODE;
+    uint old_variant = 0;
+    bool set_variant = false;
     /* check synchronization, we need to make sure no one flushes the
      * fragment we just looked up while we are recreating it, if it's the
      * caller's dcontext then just need to be couldbelinking, otherwise need
@@ -5437,6 +5432,11 @@ recreate_fragment_ilist(dcontext_t *dcontext, byte *pc,
     DEBUG_DECLARE(bool ok =)
     dr_set_isa_mode(dcontext, FRAG_ISA_MODE(f->flags), &old_mode);
     ASSERT(ok);
+    /* ...and for the same fragment variant, which the client's block event can
+     * query (dr_get_fragment_variant()).
+     */
+    old_variant = fragment_set_event_variant(dcontext, FRAGMENT_VARIANT(f));
+    set_variant = true;
 
     if ((f->flags & FRAG_IS_TRACE) == 0) {
         /* easy case: just a bb */
@@ -5600,6 +5600,8 @@ recreate_fragment_done:
         HEAP_ARRAY_FREE(dcontext, md.blk_info, trace_bb_build_t, md.num_blks, ACCT_TRACE,
                         true);
     }
+    if (set_variant)
+        fragment_set_event_variant(dcontext, old_variant);
     if (alloc_res != NULL)
         *alloc_res = alloc;
     if (f_res == NULL && alloc)

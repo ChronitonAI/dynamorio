@@ -1217,6 +1217,7 @@ recreate_selfmod_ilist(dcontext_t *dcontext, fragment_t *f)
     cache_pc selfmod_copy;
     instrlist_t *ilist;
     instr_t *inst;
+    uint old_variant;
     ASSERT(TESTANY(FRAG_SELFMOD_SANDBOXED, f->flags));
     /* If f is selfmod, app code may have changed (we see this w/ code
      * on the stack later flushed w/ os_thread_stack_exit(), though in that
@@ -1234,12 +1235,15 @@ recreate_selfmod_ilist(dcontext_t *dcontext, fragment_t *f)
     /* Be sure to "pretend" the bb is for f->tag, b/c selfmod instru is
      * different based on whether pc's are in low 2GB or not.
      */
+    /* The client's block event is for f's fragment variant. */
+    old_variant = fragment_set_event_variant(dcontext, FRAGMENT_VARIANT(f));
     ilist = recreate_bb_ilist(dcontext, selfmod_copy, (byte *)f->tag,
                               /* Be sure to limit the size (i#1441) */
                               selfmod_copy + FRAGMENT_SELFMOD_COPY_CODE_SIZE(f),
                               FRAG_SELFMOD_SANDBOXED, NULL, NULL,
                               false /*don't check vm areas!*/, true /*mangle*/, NULL,
                               true /*call client*/, false /*!for_trace*/);
+    fragment_set_event_variant(dcontext, old_variant);
     ASSERT(ilist != NULL); /* shouldn't fail: our own code is always readable! */
     for (inst = instrlist_first(ilist); inst; inst = instr_get_next(inst)) {
         app_pc app = instr_get_translation(inst);
@@ -1464,6 +1468,9 @@ recreate_app_state_internal(dcontext_t *tdcontext, priv_mcontext_t *mcontext,
         fragment_t *f = owning_f;
         bool alloc = false;
         dr_isa_mode_t old_mode;
+        /* The client's block and restore state events are for f's variant. */
+        uint old_variant = 0;
+        bool set_variant = false;
 #ifdef WINDOWS
         bool swap_peb = false;
 #endif
@@ -1502,6 +1509,11 @@ recreate_app_state_internal(dcontext_t *tdcontext, priv_mcontext_t *mcontext,
             alloc = true;
         }
 
+        if (f != NULL) {
+            old_variant = fragment_set_event_variant(tdcontext, FRAGMENT_VARIANT(f));
+            set_variant = true;
+        }
+
         /* Whether a bb or trace, this routine will recreate the entire ilist. */
         if (f == NULL) {
             ilist = recreate_fragment_ilist(tdcontext, mcontext->pc, &f, &alloc,
@@ -1527,6 +1539,10 @@ recreate_app_state_internal(dcontext_t *tdcontext, priv_mcontext_t *mcontext,
             ASSERT(!INTERNAL_OPTION(safe_translate_flushed));
             res = RECREATE_FAILURE;
             goto recreate_app_state_done;
+        }
+        if (!set_variant) {
+            old_variant = fragment_set_event_variant(tdcontext, FRAGMENT_VARIANT(f));
+            set_variant = true;
         }
 
         LOG(THREAD_GET, LOG_INTERP, 2, "recreate_app : pc is in F%d(" PFX ")%s\n", f->id,
@@ -1645,6 +1661,7 @@ recreate_app_state_internal(dcontext_t *tdcontext, priv_mcontext_t *mcontext,
             client_info.fragment_info.app_code_consistent =
                 !TESTANY(FRAG_WAS_DELETED | FRAG_SELFMOD_SANDBOXED, f->flags);
             client_info.fragment_info.ilist = ilist;
+            client_info.fragment_info.variant = FRAGMENT_VARIANT(f);
             /* i#220/PR 480565: client has option of failing the translation */
             if (!instrument_restore_state(tdcontext, restore_memory, &client_info))
                 res = RECREATE_FAILURE;
@@ -1653,6 +1670,8 @@ recreate_app_state_internal(dcontext_t *tdcontext, priv_mcontext_t *mcontext,
 #endif
 
     recreate_app_state_done:
+        if (set_variant)
+            fragment_set_event_variant(tdcontext, old_variant);
         /* free the instrlist_t elements */
         if (ilist != NULL)
             instrlist_clear_and_destroy(tdcontext, ilist);

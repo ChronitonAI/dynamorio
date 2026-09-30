@@ -5092,6 +5092,7 @@ client_exception_event(dcontext_t *dcontext, CONTEXT *cxt, EXCEPTION_RECORD *pEx
     /* i#207 fragment tag and fcache start pc on fault. */
     einfo.fault_fragment_info.tag = NULL;
     einfo.fault_fragment_info.cache_start_pc = NULL;
+    einfo.fault_fragment_info.variant = 0;
     if (fragment == NULL)
         fragment = fragment_pclookup(dcontext, einfo.raw_mcontext->pc, &wrapper);
     if (fragment != NULL && !hide_tag_from_client(fragment->tag)) {
@@ -5100,6 +5101,7 @@ client_exception_event(dcontext_t *dcontext, CONTEXT *cxt, EXCEPTION_RECORD *pEx
         einfo.fault_fragment_info.is_trace = TESTANY(FRAG_IS_TRACE, fragment->flags);
         einfo.fault_fragment_info.app_code_consistent =
             !TESTANY(FRAG_WAS_DELETED | FRAG_SELFMOD_SANDBOXED, fragment->flags);
+        einfo.fault_fragment_info.variant = FRAGMENT_VARIANT(fragment);
     }
 
     /* i#249: swap PEB pointers.  We assume that no other Ki-handling code needs

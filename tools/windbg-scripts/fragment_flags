@@ -60,7 +60,7 @@ $$ flags as of fragment.h 1.178
 .if ((poi(@$t0+4) & 0x1000000)==0x1000000) {.echo "SHARED";};
 .if ((poi(@$t0+4) & 0x2000000)==0x2000000) {.echo "TEMP_PRIVATE";};
 .if ((poi(@$t0+4) & 0x4000000)==0x4000000) {.echo "TRACE_OUTPUT";};
-.if ((poi(@$t0+4) & 0x8000000)==0x8000000) {.echo "CBR_FALLTHROUGH_SHORT";};
+.if ((poi(@$t0+4) & 0x8000000)==0x8000000) {.echo "HAS_VARIANT";};
 .if ((poi(@$t0+4) & 0x10000000)==0x10000000) {.echo "COARSE_GRAIN";};
 .if ((poi(@$t0+4) & 0x20000000)==0x20000000) {.echo "IBL_TARGETED";}
 .if ((poi(@$t0+4) & 0x40000000)==0x40000000) {.echo "DO_NOT_SIDELINE";};

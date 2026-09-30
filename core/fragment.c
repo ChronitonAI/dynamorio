@@ -112,11 +112,25 @@ DECLARE_FREQPROT_VAR(static app_pc flush_tag, NULL);
  * for now none of these are read from ibl routines so we only have to
  * synch with other DR routines
  */
+/* With -num_fragment_variants each of these points to an array with one table per
+ * variant (indexed by the variant).
+ */
 static fragment_table_t *shared_bb;
 static fragment_table_t *shared_trace;
 
 /* if we have either shared bbs or shared traces we need this shared: */
 static fragment_table_t *shared_future;
+
+#define NUM_VARIANTS() (DYNAMO_OPTION(num_fragment_variants))
+
+/* The variant that fragment_event_variant() returns for GLOBAL_DCONTEXT: that of a
+ * fragment whose deletion event is raised without a thread's context, which only
+ * happens while all threads are synchronized (at exit or reset).
+ */
+DECLARE_NEVERPROT_VAR(static uint global_event_variant, 0);
+
+static void
+fragment_deleted_event(dcontext_t *dcontext, fragment_t *f);
 
 /* Thread-shared tables are allocated in a shared per_thread_t.
  * The structure is also used if we're dumping shared traces.
@@ -225,18 +239,42 @@ static const fragment_t unlinked_fragment = {
     ((dc) == GLOBAL_DCONTEXT ? (USE_SHARED_PT() ? shared_pt : NULL) \
                              : (per_thread_t *)(dc)->fragment_field)
 
+/* The container of the private tables of variant v of dc's thread.  Thread-shared
+ * ibt tables (the only users of shared_pt besides trace dumping, which needs traces)
+ * are not supported with fragment variants, so shared_pt only has variant 0.
+ */
+#define GET_VARIANT_PT(dc, v)      \
+    (ASSERT((v) < NUM_VARIANTS()), \
+     (v) == 0 ? GET_PT(dc) : PT_VARIANT(GET_PT(dc), (dc) == GLOBAL_DCONTEXT ? 0 : (v)))
+
+/* Variant v's table in the array of shared tables tables (see shared_bb).  We test
+ * for variant 0 so that the default single-variant case costs no more than it
+ * did before variants.
+ */
+#define VARIANT_TABLE(tables, v) ((v) == 0 ? (tables) : &(tables)[v])
+
+/* The current variant of dc's thread (0 for GLOBAL_DCONTEXT). */
+#define CUR_VARIANT(dc)                                                               \
+    ((NUM_VARIANTS() == 1 || (dc) == GLOBAL_DCONTEXT || (dc)->fragment_field == NULL) \
+         ? 0                                                                          \
+         : ((per_thread_t *)(dc)->fragment_field)->variant)
+
 #define TABLE_PROTECTED(ptable) \
     (!TABLE_NEEDS_LOCK(ptable) || READWRITE_LOCK_HELD(&(ptable)->rwlock))
 
-/* everything except the invisible table is in here */
-#define GET_FTABLE_HELPER(pt, flags, otherwise)                                  \
-    (TESTANY(FRAG_IS_TRACE, (flags))                                             \
-         ? (TESTANY(FRAG_SHARED, (flags)) ? shared_trace : &pt->trace)           \
-         : (TESTANY(FRAG_SHARED, (flags))                                        \
-                ? (TESTANY(FRAG_IS_FUTURE, (flags)) ? shared_future : shared_bb) \
-                : (TESTANY(FRAG_IS_FUTURE, (flags)) ? &pt->future : (otherwise))))
+/* Everything except the invisible table is in here.  vpt is the container of
+ * variant v's private tables (see GET_VARIANT_PT()).
+ */
+#define GET_FTABLE_HELPER(vpt, flags, otherwise, v)                                   \
+    (TESTANY(FRAG_IS_TRACE, (flags))                                                  \
+         ? (TESTANY(FRAG_SHARED, (flags)) ? VARIANT_TABLE(shared_trace, v)            \
+                                          : &(vpt)->trace)                            \
+         : (TESTANY(FRAG_SHARED, (flags))                                             \
+                ? (TESTANY(FRAG_IS_FUTURE, (flags)) ? VARIANT_TABLE(shared_future, v) \
+                                                    : VARIANT_TABLE(shared_bb, v))    \
+                : (TESTANY(FRAG_IS_FUTURE, (flags)) ? &(vpt)->future : (otherwise))))
 
-#define GET_FTABLE(pt, flags) GET_FTABLE_HELPER(pt, (flags), &pt->bb)
+#define GET_FTABLE(vpt, flags, v) GET_FTABLE_HELPER(vpt, (flags), &(vpt)->bb, v)
 
 /* indirect branch table per target type (bb vs trace) and indirect branch type */
 #define GET_IBT_TABLE(pt, flags, branch_type)                                       \
@@ -539,7 +577,7 @@ print_size_results(void)
 static void
 check_stay_on_trace_stats_overflow(dcontext_t *dcontext, ibl_branch_type_t branch_type)
 {
-    per_thread_t *pt = (per_thread_t *)dcontext->fragment_field;
+    per_thread_t *pt = (per_thread_t *)dcontext->fragment_ibt_field;
     hashtable_statistics_t *lookup_stats =
         &pt->trace_ibt[branch_type].unprot_stats->trace_ibl_stats[branch_type];
     if (lookup_stats->ib_stay_on_trace_stat < lookup_stats->ib_stay_on_trace_stat_last) {
@@ -583,6 +621,18 @@ update_lookuptable_tls(dcontext_t *dcontext, ibl_table_t *table)
      */
     ATOMIC_PTRSZ_ALIGNED_WRITE(&state->table_space.table[table->branch_type].hash_mask,
                                table->hash_mask, false);
+}
+
+/* Returns whether table is one of the private ibt tables that the lookup routines
+ * of dcontext's thread use now: with fragment variants, only the tables of the
+ * thread's current variant are in use (see fragment_switch_to_selected_variant()).
+ */
+static inline bool
+is_active_private_ibt_table(dcontext_t *dcontext, ibl_table_t *table)
+{
+    per_thread_t *ibt_pt = (per_thread_t *)dcontext->fragment_ibt_field;
+    ASSERT(ibt_pt != NULL);
+    return (byte *)table >= (byte *)ibt_pt && (byte *)table < (byte *)(ibt_pt + 1);
 }
 
 #ifdef DEBUG
@@ -761,7 +811,8 @@ hashtable_ibl_init_internal_custom(dcontext_t *dcontext, ibl_table_t *table)
          */
         if ((TESTANY(FRAG_TABLE_TRACE, table->table_flags) ||
              SHARED_BB_ONLY_IB_TARGETS()) &&
-            DYNAMO_OPTION(ibl_table_in_tls))
+            DYNAMO_OPTION(ibl_table_in_tls) &&
+            is_active_private_ibt_table(dcontext, table))
             update_lookuptable_tls(dcontext, table);
     }
 }
@@ -1088,6 +1139,16 @@ hashtable_ibl_study_custom(dcontext_t *dcontext, ibl_table_t *table,
         INTERNAL_OPTION(hashtable_ibl_stats)) {
         per_thread_t *pt = GET_PT(dcontext);
         ibl_branch_type_t branch_type;
+        uint v;
+        /* Find the container of table if it is a private table of another variant. */
+        for (v = 1; pt != NULL && dcontext != GLOBAL_DCONTEXT && v < NUM_VARIANTS();
+             v++) {
+            per_thread_t *vpt = PT_VARIANT(pt, v);
+            if ((byte *)table >= (byte *)vpt && (byte *)table < (byte *)(vpt + 1)) {
+                pt = vpt;
+                break;
+            }
+        }
 
         for (branch_type = IBL_BRANCH_TYPE_START; branch_type < IBL_BRANCH_TYPE_END;
              branch_type++) {
@@ -1162,7 +1223,7 @@ hashtable_fragment_reset(dcontext_t *dcontext, fragment_table_t *table)
          * FRAGDEL_NO_FCACHE: see the fragment_delete() call in the debug path
          * below) so we call the event for every (real) fragment.
          */
-        instrument_fragment_deleted(dcontext, f->tag, f->flags);
+        fragment_deleted_event(dcontext, f);
     }
     if (!DYNAMO_OPTION(separate_private_stubs))
         return;
@@ -1316,26 +1377,32 @@ fragment_reset_init(void)
     d_r_mutex_unlock(&shared_cache_flush_lock);
 
     if (SHARED_FRAGMENTS_ENABLED()) {
-        if (DYNAMO_OPTION(shared_bbs)) {
+        uint v;
+        for (v = 0; v < NUM_VARIANTS(); v++) {
+            if (DYNAMO_OPTION(shared_bbs)) {
+                hashtable_fragment_init(
+                    GLOBAL_DCONTEXT, &shared_bb[v], INIT_HTABLE_SIZE_SHARED_BB,
+                    INTERNAL_OPTION(shared_bb_load),
+                    (hash_function_t)INTERNAL_OPTION(alt_hash_func),
+                    0 /* hash_mask_offset */,
+                    FRAG_TABLE_SHARED | FRAG_TABLE_TARGET_SHARED _IF_DEBUG("shared_bb"));
+            }
+            if (DYNAMO_OPTION(shared_traces)) {
+                hashtable_fragment_init(
+                    GLOBAL_DCONTEXT, &shared_trace[v], INIT_HTABLE_SIZE_SHARED_TRACE,
+                    INTERNAL_OPTION(shared_trace_load),
+                    (hash_function_t)INTERNAL_OPTION(alt_hash_func),
+                    0 /* hash_mask_offset */,
+                    FRAG_TABLE_SHARED |
+                        FRAG_TABLE_TARGET_SHARED _IF_DEBUG("shared_trace"));
+            }
+            /* init routine will work for future_fragment_t* same as for fragment_t* */
             hashtable_fragment_init(
-                GLOBAL_DCONTEXT, shared_bb, INIT_HTABLE_SIZE_SHARED_BB,
-                INTERNAL_OPTION(shared_bb_load),
+                GLOBAL_DCONTEXT, &shared_future[v], INIT_HTABLE_SIZE_SHARED_FUTURE,
+                INTERNAL_OPTION(shared_future_load),
                 (hash_function_t)INTERNAL_OPTION(alt_hash_func), 0 /* hash_mask_offset */,
-                FRAG_TABLE_SHARED | FRAG_TABLE_TARGET_SHARED _IF_DEBUG("shared_bb"));
+                FRAG_TABLE_SHARED | FRAG_TABLE_TARGET_SHARED _IF_DEBUG("shared_future"));
         }
-        if (DYNAMO_OPTION(shared_traces)) {
-            hashtable_fragment_init(
-                GLOBAL_DCONTEXT, shared_trace, INIT_HTABLE_SIZE_SHARED_TRACE,
-                INTERNAL_OPTION(shared_trace_load),
-                (hash_function_t)INTERNAL_OPTION(alt_hash_func), 0 /* hash_mask_offset */,
-                FRAG_TABLE_SHARED | FRAG_TABLE_TARGET_SHARED _IF_DEBUG("shared_trace"));
-        }
-        /* init routine will work for future_fragment_t* same as for fragment_t* */
-        hashtable_fragment_init(
-            GLOBAL_DCONTEXT, shared_future, INIT_HTABLE_SIZE_SHARED_FUTURE,
-            INTERNAL_OPTION(shared_future_load),
-            (hash_function_t)INTERNAL_OPTION(alt_hash_func), 0 /* hash_mask_offset */,
-            FRAG_TABLE_SHARED | FRAG_TABLE_TARGET_SHARED _IF_DEBUG("shared_future"));
     }
 
     if (SHARED_IBT_TABLES_ENABLED()) {
@@ -1426,17 +1493,19 @@ fragment_init(void)
     if (SHARED_FRAGMENTS_ENABLED()) {
         /* tables are persistent across resets, only on heap for selfprot (case 7957) */
         if (DYNAMO_OPTION(shared_bbs)) {
-            shared_bb = HEAP_TYPE_ALLOC(GLOBAL_DCONTEXT, fragment_table_t,
-                                        ACCT_FRAG_TABLE, PROTECTED);
+            shared_bb = HEAP_ARRAY_ALLOC(GLOBAL_DCONTEXT, fragment_table_t,
+                                         NUM_VARIANTS(), ACCT_FRAG_TABLE, PROTECTED);
         }
         if (DYNAMO_OPTION(shared_traces)) {
-            shared_trace = HEAP_TYPE_ALLOC(GLOBAL_DCONTEXT, fragment_table_t,
-                                           ACCT_FRAG_TABLE, PROTECTED);
+            shared_trace = HEAP_ARRAY_ALLOC(GLOBAL_DCONTEXT, fragment_table_t,
+                                            NUM_VARIANTS(), ACCT_FRAG_TABLE, PROTECTED);
         }
-        shared_future = HEAP_TYPE_ALLOC(GLOBAL_DCONTEXT, fragment_table_t,
-                                        ACCT_FRAG_TABLE, PROTECTED);
+        shared_future = HEAP_ARRAY_ALLOC(GLOBAL_DCONTEXT, fragment_table_t,
+                                         NUM_VARIANTS(), ACCT_FRAG_TABLE, PROTECTED);
     }
 
+    /* Fragment variants are not supported with the users of shared_pt. */
+    ASSERT(!USE_SHARED_PT() || NUM_VARIANTS() == 1);
     if (USE_SHARED_PT())
         shared_pt = HEAP_TYPE_ALLOC(GLOBAL_DCONTEXT, per_thread_t, ACCT_OTHER, PROTECTED);
 
@@ -1548,23 +1617,29 @@ fragment_reset_free(void)
             vm_area_coarse_units_reset_free();
         }
 
+        uint v;
+        for (v = 0; v < NUM_VARIANTS(); v++) {
 #ifndef DEBUG
-        if (dr_fragment_deleted_hook_exists()) {
+            if (dr_fragment_deleted_hook_exists()) {
 #endif
-            if (DYNAMO_OPTION(shared_bbs))
-                hashtable_fragment_reset(GLOBAL_DCONTEXT, shared_bb);
-            if (DYNAMO_OPTION(shared_traces))
-                hashtable_fragment_reset(GLOBAL_DCONTEXT, shared_trace);
-            DODEBUG({ hashtable_fragment_reset(GLOBAL_DCONTEXT, shared_future); });
+                if (DYNAMO_OPTION(shared_bbs))
+                    hashtable_fragment_reset(GLOBAL_DCONTEXT, &shared_bb[v]);
+                if (DYNAMO_OPTION(shared_traces))
+                    hashtable_fragment_reset(GLOBAL_DCONTEXT, &shared_trace[v]);
+                DODEBUG(
+                    { hashtable_fragment_reset(GLOBAL_DCONTEXT, &shared_future[v]); });
 #ifndef DEBUG
+            }
+#endif
         }
-#endif
 
-        if (DYNAMO_OPTION(shared_bbs))
-            hashtable_fragment_free(GLOBAL_DCONTEXT, shared_bb);
-        if (DYNAMO_OPTION(shared_traces))
-            hashtable_fragment_free(GLOBAL_DCONTEXT, shared_trace);
-        hashtable_fragment_free(GLOBAL_DCONTEXT, shared_future);
+        for (v = 0; v < NUM_VARIANTS(); v++) {
+            if (DYNAMO_OPTION(shared_bbs))
+                hashtable_fragment_free(GLOBAL_DCONTEXT, &shared_bb[v]);
+            if (DYNAMO_OPTION(shared_traces))
+                hashtable_fragment_free(GLOBAL_DCONTEXT, &shared_trace[v]);
+            hashtable_fragment_free(GLOBAL_DCONTEXT, &shared_future[v]);
+        }
         /* Do NOT free RAC table as its state cannot be rebuilt.
          * We also do not free other RCT tables to avoid the time to rebuild them.
          */
@@ -1663,19 +1738,19 @@ fragment_exit(void)
     if (SHARED_FRAGMENTS_ENABLED()) {
         /* tables are persistent across resets, only on heap for selfprot (case 7957) */
         if (DYNAMO_OPTION(shared_bbs)) {
-            HEAP_TYPE_FREE(GLOBAL_DCONTEXT, shared_bb, fragment_table_t, ACCT_FRAG_TABLE,
-                           PROTECTED);
+            HEAP_ARRAY_FREE(GLOBAL_DCONTEXT, shared_bb, fragment_table_t, NUM_VARIANTS(),
+                            ACCT_FRAG_TABLE, PROTECTED);
             shared_bb = NULL;
         } else
             ASSERT(shared_bb == NULL);
         if (DYNAMO_OPTION(shared_traces)) {
-            HEAP_TYPE_FREE(GLOBAL_DCONTEXT, shared_trace, fragment_table_t,
-                           ACCT_FRAG_TABLE, PROTECTED);
+            HEAP_ARRAY_FREE(GLOBAL_DCONTEXT, shared_trace, fragment_table_t,
+                            NUM_VARIANTS(), ACCT_FRAG_TABLE, PROTECTED);
             shared_trace = NULL;
         } else
             ASSERT(shared_trace == NULL);
-        HEAP_TYPE_FREE(GLOBAL_DCONTEXT, shared_future, fragment_table_t, ACCT_FRAG_TABLE,
-                       PROTECTED);
+        HEAP_ARRAY_FREE(GLOBAL_DCONTEXT, shared_future, fragment_table_t, NUM_VARIANTS(),
+                        ACCT_FRAG_TABLE, PROTECTED);
         shared_future = NULL;
     }
 
@@ -1826,29 +1901,13 @@ dec_all_table_ref_counts(dcontext_t *dcontext, per_thread_t *pt)
     }
 }
 
-/* re-initializes non-persistent memory */
-void
-fragment_thread_reset_init(dcontext_t *dcontext)
+/* Initializes the private tables of one fragment variant, which pt holds: see
+ * the per_thread_t definition.
+ */
+static void
+fragment_thread_reset_init_tables(dcontext_t *dcontext, per_thread_t *pt)
 {
-    per_thread_t *pt;
     ibl_branch_type_t branch_type;
-
-    /* case 7966: don't initialize at all for hotp_only & thin_client */
-    if (RUNNING_WITHOUT_CODE_CACHE())
-        return;
-
-    pt = (per_thread_t *)dcontext->fragment_field;
-
-    /* important to init w/ cur timestamp to avoid this thread dec-ing ref
-     * count when it wasn't included in ref count init value!
-     * assumption: don't need lock to read flushtime_global atomically.
-     * when resetting, though, thread free & re-init is done before global free,
-     * so we have to explicitly set to 0 for that case.
-     */
-    if (dynamo_resetting)
-        pt->flushtime_last_update = 0;
-    else
-        ATOMIC_4BYTE_ALIGNED_READ(&flushtime_global, &pt->flushtime_last_update);
 
     /* set initial hashtable sizes */
     hashtable_fragment_init(
@@ -1995,6 +2054,35 @@ fragment_thread_reset_init(dcontext_t *dcontext)
         }
     }
     ASSERT(IBL_BRANCH_TYPE_END == 3);
+}
+
+/* re-initializes non-persistent memory */
+void
+fragment_thread_reset_init(dcontext_t *dcontext)
+{
+    per_thread_t *pt;
+    uint v;
+
+    /* case 7966: don't initialize at all for hotp_only & thin_client */
+    if (RUNNING_WITHOUT_CODE_CACHE())
+        return;
+
+    pt = (per_thread_t *)dcontext->fragment_field;
+
+    /* important to init w/ cur timestamp to avoid this thread dec-ing ref
+     * count when it wasn't included in ref count init value!
+     * assumption: don't need lock to read flushtime_global atomically.
+     * when resetting, though, thread free & re-init is done before global free,
+     * so we have to explicitly set to 0 for that case.
+     */
+    if (dynamo_resetting)
+        pt->flushtime_last_update = 0;
+    else
+        ATOMIC_4BYTE_ALIGNED_READ(&flushtime_global, &pt->flushtime_last_update);
+
+    /* Each fragment variant has its own tables. */
+    for (v = 0; v < NUM_VARIANTS(); v++)
+        fragment_thread_reset_init_tables(dcontext, PT_VARIANT(pt, v));
 
     update_generated_hashtable_access(dcontext);
 }
@@ -2016,8 +2104,18 @@ fragment_thread_init(dcontext_t *dcontext)
     if (RUNNING_WITHOUT_CODE_CACHE())
         return;
 
-    pt = (per_thread_t *)global_heap_alloc(sizeof(per_thread_t) HEAPACCT(ACCT_OTHER));
+    /* One per_thread_t per fragment variant: see the per_thread_t definition. */
+    pt = (per_thread_t *)global_heap_alloc(NUM_VARIANTS() *
+                                           sizeof(per_thread_t) HEAPACCT(ACCT_OTHER));
     dcontext->fragment_field = (void *)pt;
+    /* The table containers of the other variants have no other state. */
+    if (NUM_VARIANTS() > 1)
+        memset(pt + 1, 0, (NUM_VARIANTS() - 1) * sizeof(per_thread_t));
+    /* A new thread starts in variant 0. */
+    pt->variant = 0;
+    pt->next_variant = 0;
+    pt->event_variant = 0;
+    dcontext->fragment_ibt_field = (void *)PT_VARIANT(pt, pt->variant);
 
     fragment_thread_reset_init(dcontext);
 
@@ -2043,37 +2141,12 @@ fragment_thread_init(dcontext_t *dcontext)
 static bool
 check_flush_queue(dcontext_t *dcontext, fragment_t *was_I_flushed);
 
-/* frees all non-persistent memory */
-void
-fragment_thread_reset_free(dcontext_t *dcontext)
-{
-    per_thread_t *pt = (per_thread_t *)dcontext->fragment_field;
-    DEBUG_DECLARE(ibl_branch_type_t branch_type;)
-
-    /* case 7966: don't initialize at all for hotp_only & thin_client */
-    if (RUNNING_WITHOUT_CODE_CACHE())
-        return;
-
-    /* Dec ref count on any shared tables that are pointed to. */
-    dec_all_table_ref_counts(dcontext, pt);
-
 #ifdef DEBUG
-    /* for non-debug we do fast exit path and don't free local heap */
-    SELF_PROTECT_CACHE(dcontext, NULL, WRITABLE);
-
-    /* we remove flushed fragments from the htable, and they can be
-     * flushed after enter_threadexit() due to os_thread_stack_exit(),
-     * so we need to check the flush queue here
-     */
-    d_r_mutex_lock(&pt->linking_lock);
-    check_flush_queue(dcontext, NULL);
-    d_r_mutex_unlock(&pt->linking_lock);
-
-    /* For consistency we remove entries from the IBL targets
-     * tables before we remove them from the trace table.  However,
-     * we cannot free any fragments because for sure all of them will
-     * be present in the trace table.
-     */
+/* Frees the private ibt tables of one fragment variant, which pt holds. */
+static void
+fragment_thread_free_ibt_tables(dcontext_t *dcontext, per_thread_t *pt)
+{
+    ibl_branch_type_t branch_type;
     for (branch_type = IBL_BRANCH_TYPE_START; branch_type < IBL_BRANCH_TYPE_END;
          branch_type++) {
         if (!DYNAMO_OPTION(disable_traces)
@@ -2125,10 +2198,14 @@ fragment_thread_reset_free(dcontext_t *dcontext)
             }
         }
     }
+}
 
-    /* case 7653: we can't free the main tables prior to freeing the contents
-     * of all of them, as link freeing involves looking up in the other tables.
-     */
+/* Deletes the fragments in the private tables of one fragment variant, which pt
+ * holds.
+ */
+static void
+fragment_thread_reset_tables(dcontext_t *dcontext, per_thread_t *pt)
+{
     if (PRIVATE_TRACES_ENABLED()) {
         DOLOG(1, LOG_FRAGMENT | LOG_STATS,
               { hashtable_fragment_load_statistics(dcontext, &pt->trace); });
@@ -2140,11 +2217,60 @@ fragment_thread_reset_free(dcontext_t *dcontext)
     DOLOG(1, LOG_FRAGMENT | LOG_STATS,
           { hashtable_fragment_load_statistics(dcontext, &pt->future); });
     hashtable_fragment_reset(dcontext, &pt->future);
+}
 
+/* Frees the private fragment tables of one fragment variant, which pt holds. */
+static void
+fragment_thread_free_tables(dcontext_t *dcontext, per_thread_t *pt)
+{
     if (PRIVATE_TRACES_ENABLED())
         hashtable_fragment_free(dcontext, &pt->trace);
     hashtable_fragment_free(dcontext, &pt->bb);
     hashtable_fragment_free(dcontext, &pt->future);
+}
+#endif
+
+/* frees all non-persistent memory */
+void
+fragment_thread_reset_free(dcontext_t *dcontext)
+{
+    per_thread_t *pt = (per_thread_t *)dcontext->fragment_field;
+    uint v;
+
+    /* case 7966: don't initialize at all for hotp_only & thin_client */
+    if (RUNNING_WITHOUT_CODE_CACHE())
+        return;
+
+    /* Dec ref count on any shared tables that are pointed to. */
+    dec_all_table_ref_counts(dcontext, pt);
+
+#ifdef DEBUG
+    /* for non-debug we do fast exit path and don't free local heap */
+    SELF_PROTECT_CACHE(dcontext, NULL, WRITABLE);
+
+    /* we remove flushed fragments from the htable, and they can be
+     * flushed after enter_threadexit() due to os_thread_stack_exit(),
+     * so we need to check the flush queue here
+     */
+    d_r_mutex_lock(&pt->linking_lock);
+    check_flush_queue(dcontext, NULL);
+    d_r_mutex_unlock(&pt->linking_lock);
+
+    /* For consistency we remove entries from the IBL targets
+     * tables before we remove them from the trace table.  However,
+     * we cannot free any fragments because for sure all of them will
+     * be present in the trace table.
+     */
+    for (v = 0; v < NUM_VARIANTS(); v++)
+        fragment_thread_free_ibt_tables(dcontext, PT_VARIANT(pt, v));
+
+    /* case 7653: we can't free the main tables prior to freeing the contents
+     * of all of them, as link freeing involves looking up in the other tables.
+     */
+    for (v = 0; v < NUM_VARIANTS(); v++)
+        fragment_thread_reset_tables(dcontext, PT_VARIANT(pt, v));
+    for (v = 0; v < NUM_VARIANTS(); v++)
+        fragment_thread_free_tables(dcontext, PT_VARIANT(pt, v));
 
     SELF_PROTECT_CACHE(dcontext, NULL, READONLY);
 
@@ -2152,9 +2278,12 @@ fragment_thread_reset_free(dcontext_t *dcontext)
     /* Case 10807: Clients need to be informed of fragment deletions
      * so we'll reset the relevant hash tables for CI release builds.
      */
-    if (PRIVATE_TRACES_ENABLED())
-        hashtable_fragment_reset(dcontext, &pt->trace);
-    hashtable_fragment_reset(dcontext, &pt->bb);
+    for (v = 0; v < NUM_VARIANTS(); v++) {
+        per_thread_t *vpt = PT_VARIANT(pt, v);
+        if (PRIVATE_TRACES_ENABLED())
+            hashtable_fragment_reset(dcontext, &vpt->trace);
+        hashtable_fragment_reset(dcontext, &vpt->bb);
+    }
 
 #endif /* !DEBUG */
 }
@@ -2193,8 +2322,9 @@ fragment_thread_exit(dcontext_t *dcontext)
 
     DELETE_LOCK(pt->fragment_delete_mutex);
 
-    global_heap_free(pt, sizeof(per_thread_t) HEAPACCT(ACCT_OTHER));
+    global_heap_free(pt, NUM_VARIANTS() * sizeof(per_thread_t) HEAPACCT(ACCT_OTHER));
     dcontext->fragment_field = NULL;
+    dcontext->fragment_ibt_field = NULL;
 }
 
 bool
@@ -2221,6 +2351,7 @@ fragment_fork_init(dcontext_t *dcontext)
 
 /* fragment_t heap layout looks like this:
  *
+ *   fragment variant (ptr_uint_t), if FRAG_HAS_VARIANT
  *   fragment_t/trace_t
  *   translation_info_t*, if necessary
  *   array composed of different sizes of linkstub_t subclasses:
@@ -2234,7 +2365,7 @@ fragment_heap_size(uint flags, int direct_exits, int indirect_exits)
 {
     uint total_sz;
     ASSERT((direct_exits + indirect_exits > 0) || TESTANY(FRAG_COARSE_GRAIN, flags));
-    total_sz = FRAGMENT_STRUCT_SIZE(flags) +
+    total_sz = FRAGMENT_VARIANT_FIELD_SIZE(flags) + FRAGMENT_STRUCT_SIZE(flags) +
         linkstubs_heap_size(flags, direct_exits, indirect_exits);
     /* we rely on a small heap size for our ushort offset at the end */
     ASSERT(total_sz <= USHRT_MAX);
@@ -2251,9 +2382,12 @@ fragment_create_heap(dcontext_t *dcontext, int direct_exits, int indirect_exits,
     dcontext_t *alloc_dc = FRAGMENT_ALLOC_DC(dcontext, flags);
     uint heapsz = fragment_heap_size(flags, direct_exits, indirect_exits);
     /* linkstubs are in an array immediately after the fragment_t/trace_t struct */
-    fragment_t *f = (fragment_t *)nonpersistent_heap_alloc(
-        alloc_dc,
-        heapsz HEAPACCT(TESTANY(FRAG_IS_TRACE, flags) ? ACCT_TRACE : ACCT_FRAGMENT));
+    fragment_t *f = (fragment_t *)(((byte *)nonpersistent_heap_alloc(
+                                       alloc_dc,
+                                       heapsz HEAPACCT(TESTANY(FRAG_IS_TRACE, flags)
+                                                           ? ACCT_TRACE
+                                                           : ACCT_FRAGMENT))) +
+                                   FRAGMENT_VARIANT_FIELD_SIZE(flags));
     LOG(THREAD, LOG_FRAGMENT, 5,
         "fragment heap size for flags 0x%08x, exits %d %d, is %d => " PFX "\n", flags,
         direct_exits, indirect_exits, heapsz, f);
@@ -2317,7 +2451,16 @@ fragment_create(dcontext_t *dcontext, app_pc tag, int body_size, int direct_exit
                 int indirect_exits, int exits_size, uint flags)
 {
     fragment_t *f;
+    /* New fragments are always in the thread's current variant (flags copied from
+     * an existing fragment, e.g., for a replacement, may name its variant).
+     */
+    uint variant = CUR_VARIANT(dcontext);
     DEBUG_DECLARE(stats_int_t next_id;)
+    flags &= ~FRAG_HAS_VARIANT;
+    if (variant != 0) {
+        ASSERT(!TESTANY(FRAG_COARSE_GRAIN, flags));
+        flags |= FRAG_HAS_VARIANT;
+    }
     DOSTATS({
         /* should watch this stat and if it gets too high need to re-do
          * who needs the post-linkstub offset
@@ -2357,6 +2500,8 @@ fragment_create(dcontext_t *dcontext, app_pc tag, int body_size, int direct_exit
     }
 
     fragment_init_heap(f, tag, direct_exits, indirect_exits, flags);
+    if (variant != 0)
+        *FRAGMENT_VARIANT_ADDR(f) = variant;
 
     /*  To make debugging easier we assign coarse-grain ids in the same namespace
      * as fine-grain fragments, though we won't remember them at all.
@@ -2566,9 +2711,13 @@ fragment_free(dcontext_t *dcontext, fragment_t *f)
                                     t->num_bbs *
                                         sizeof(trace_bb_info_t) HEAPACCT(ACCT_TRACE));
         }
-        nonpersistent_heap_free(alloc_dc, f, heapsz HEAPACCT(ACCT_TRACE));
+        nonpersistent_heap_free(alloc_dc,
+                                ((byte *)f) - FRAGMENT_VARIANT_FIELD_SIZE(f->flags),
+                                heapsz HEAPACCT(ACCT_TRACE));
     } else {
-        nonpersistent_heap_free(alloc_dc, f, heapsz HEAPACCT(ACCT_FRAGMENT));
+        nonpersistent_heap_free(alloc_dc,
+                                ((byte *)f) - FRAGMENT_VARIANT_FIELD_SIZE(f->flags),
+                                heapsz HEAPACCT(ACCT_FRAGMENT));
     }
 }
 
@@ -2626,19 +2775,24 @@ enum {
     LOOKUP_SHARED = 0x008,
 };
 
-/* A lookup constrained by bb/trace and/or shared/private */
-static inline fragment_t *
-fragment_lookup_type(dcontext_t *dcontext, app_pc tag, uint lookup_flags)
+/* A lookup constrained by bb/trace and/or shared/private, in the tables of
+ * fragment variant variant.  Always inlined so that callers passing a constant
+ * variant 0 get code as fast as without fragment variants.
+ */
+static INLINE_ALWAYS fragment_t *
+fragment_lookup_type(dcontext_t *dcontext, app_pc tag, uint lookup_flags, uint variant)
 {
     fragment_t *f;
 
-    LOG(THREAD, LOG_MONITOR, 6, "fragment_lookup_type " PFX " 0x%x\n", tag, lookup_flags);
+    LOG(THREAD, LOG_MONITOR, 6, "fragment_lookup_type " PFX " 0x%x %u\n", tag,
+        lookup_flags, variant);
+    ASSERT(variant < NUM_VARIANTS());
     if (dcontext != GLOBAL_DCONTEXT && TESTANY(LOOKUP_PRIVATE, lookup_flags)) {
         /* XXX: add a hashtablex.h wrapper that checks #entries and
          * grabs lock for us for all lookups?
          */
         /* look at private tables */
-        per_thread_t *pt = (per_thread_t *)dcontext->fragment_field;
+        per_thread_t *pt = GET_VARIANT_PT(dcontext, variant);
         /* case 147: traces take precedence over bbs */
         if (PRIVATE_TRACES_ENABLED() && TESTANY(LOOKUP_TRACE, lookup_flags)) {
             /* now try trace table */
@@ -2649,10 +2803,11 @@ fragment_lookup_type(dcontext_t *dcontext, app_pc tag, uint lookup_flags)
                     if (DYNAMO_OPTION(shared_traces)) {
                         /* ensure private trace never shadows shared trace */
                         fragment_t *sf;
-                        d_r_read_lock(&shared_trace->rwlock);
-                        sf = hashtable_fragment_lookup(dcontext, (ptr_uint_t)tag,
-                                                       shared_trace);
-                        d_r_read_unlock(&shared_trace->rwlock);
+                        d_r_read_lock(&VARIANT_TABLE(shared_trace, variant)->rwlock);
+                        sf = hashtable_fragment_lookup(
+                            dcontext, (ptr_uint_t)tag,
+                            VARIANT_TABLE(shared_trace, variant));
+                        d_r_read_unlock(&VARIANT_TABLE(shared_trace, variant)->rwlock);
                         ASSERT(sf->tag == NULL);
                     }
                 });
@@ -2671,10 +2826,10 @@ fragment_lookup_type(dcontext_t *dcontext, app_pc tag, uint lookup_flags)
                          * temp privates for trace building
                          */
                         fragment_t *sf;
-                        d_r_read_lock(&shared_bb->rwlock);
+                        d_r_read_lock(&VARIANT_TABLE(shared_bb, variant)->rwlock);
                         sf = hashtable_fragment_lookup(dcontext, (ptr_uint_t)tag,
-                                                       shared_bb);
-                        d_r_read_unlock(&shared_bb->rwlock);
+                                                       VARIANT_TABLE(shared_bb, variant));
+                        d_r_read_unlock(&VARIANT_TABLE(shared_bb, variant)->rwlock);
                         ASSERT(sf->tag == NULL || TESTANY(FRAG_TEMP_PRIVATE, f->flags));
                     }
                 });
@@ -2689,9 +2844,10 @@ fragment_lookup_type(dcontext_t *dcontext, app_pc tag, uint lookup_flags)
             /* MUST look at shared trace table before shared bb table,
              * since a shared trace can shadow a shared trace head
              */
-            d_r_read_lock(&shared_trace->rwlock);
-            f = hashtable_fragment_lookup(dcontext, (ptr_uint_t)tag, shared_trace);
-            d_r_read_unlock(&shared_trace->rwlock);
+            fragment_table_t *table = VARIANT_TABLE(shared_trace, variant);
+            d_r_read_lock(&table->rwlock);
+            f = hashtable_fragment_lookup(dcontext, (ptr_uint_t)tag, table);
+            d_r_read_unlock(&table->rwlock);
             if (f->tag != NULL) {
                 ASSERT(f->tag == tag);
                 ASSERT(!TESTANY(FRAG_FAKE | FRAG_COARSE_GRAIN, f->flags));
@@ -2703,9 +2859,10 @@ fragment_lookup_type(dcontext_t *dcontext, app_pc tag, uint lookup_flags)
             /* MUST look at private trace table before shared bb table,
              * since a private trace can shadow a shared trace head
              */
-            d_r_read_lock(&shared_bb->rwlock);
-            f = hashtable_fragment_lookup(dcontext, (ptr_uint_t)tag, shared_bb);
-            d_r_read_unlock(&shared_bb->rwlock);
+            fragment_table_t *table = VARIANT_TABLE(shared_bb, variant);
+            d_r_read_lock(&table->rwlock);
+            f = hashtable_fragment_lookup(dcontext, (ptr_uint_t)tag, table);
+            d_r_read_unlock(&table->rwlock);
             if (f->tag != NULL) {
                 ASSERT(f->tag == tag);
                 ASSERT(!TESTANY(FRAG_FAKE | FRAG_COARSE_GRAIN, f->flags));
@@ -2717,12 +2874,29 @@ fragment_lookup_type(dcontext_t *dcontext, app_pc tag, uint lookup_flags)
     return NULL;
 }
 
+/* A lookup in the tables of dcontext's current variant, specialized for the
+ * default single variant.
+ */
+#define FRAGMENT_LOOKUP_CURRENT_VARIANT(dcontext, tag, lookup_flags) \
+    (NUM_VARIANTS() == 1                                             \
+         ? fragment_lookup_type(dcontext, tag, lookup_flags, 0)      \
+         : fragment_lookup_type(dcontext, tag, lookup_flags, CUR_VARIANT(dcontext)))
+
 /* lookup a fragment tag */
 fragment_t *
 fragment_lookup(dcontext_t *dcontext, app_pc tag)
 {
-    return fragment_lookup_type(
+    return FRAGMENT_LOOKUP_CURRENT_VARIANT(
         dcontext, tag, LOOKUP_TRACE | LOOKUP_BB | LOOKUP_PRIVATE | LOOKUP_SHARED);
+}
+
+/* lookup a fragment tag in the tables of a particular fragment variant */
+fragment_t *
+fragment_lookup_variant(dcontext_t *dcontext, app_pc tag, uint variant)
+{
+    return fragment_lookup_type(dcontext, tag,
+                                LOOKUP_TRACE | LOOKUP_BB | LOOKUP_PRIVATE | LOOKUP_SHARED,
+                                variant);
 }
 
 /* lookup a fragment tag, but only look in trace tables
@@ -2731,8 +2905,8 @@ fragment_lookup(dcontext_t *dcontext, app_pc tag)
 fragment_t *
 fragment_lookup_trace(dcontext_t *dcontext, app_pc tag)
 {
-    return fragment_lookup_type(dcontext, tag,
-                                LOOKUP_TRACE | LOOKUP_PRIVATE | LOOKUP_SHARED);
+    return FRAGMENT_LOOKUP_CURRENT_VARIANT(dcontext, tag,
+                                           LOOKUP_TRACE | LOOKUP_PRIVATE | LOOKUP_SHARED);
 }
 
 /* lookup a fragment tag, but only look in bb tables
@@ -2741,8 +2915,8 @@ fragment_lookup_trace(dcontext_t *dcontext, app_pc tag)
 fragment_t *
 fragment_lookup_bb(dcontext_t *dcontext, app_pc tag)
 {
-    return fragment_lookup_type(dcontext, tag,
-                                LOOKUP_BB | LOOKUP_PRIVATE | LOOKUP_SHARED);
+    return FRAGMENT_LOOKUP_CURRENT_VARIANT(dcontext, tag,
+                                           LOOKUP_BB | LOOKUP_PRIVATE | LOOKUP_SHARED);
 }
 
 /* lookup a fragment tag, but only look in shared bb table
@@ -2751,20 +2925,21 @@ fragment_lookup_bb(dcontext_t *dcontext, app_pc tag)
 fragment_t *
 fragment_lookup_shared_bb(dcontext_t *dcontext, app_pc tag)
 {
-    return fragment_lookup_type(dcontext, tag, LOOKUP_BB | LOOKUP_SHARED);
+    return FRAGMENT_LOOKUP_CURRENT_VARIANT(dcontext, tag, LOOKUP_BB | LOOKUP_SHARED);
 }
 
 /* lookup a fragment tag, but only look in tables that are the same shared-ness
- * as flags.
+ * as flags, of fragment variant variant.
  * N.B.: because of shadowing this may not return what fragment_lookup() returns!
  */
 fragment_t *
-fragment_lookup_same_sharing(dcontext_t *dcontext, app_pc tag, uint flags)
+fragment_lookup_same_sharing(dcontext_t *dcontext, app_pc tag, uint flags, uint variant)
 {
     return fragment_lookup_type(
         dcontext, tag,
         LOOKUP_TRACE | LOOKUP_BB |
-            (TESTANY(FRAG_SHARED, flags) ? LOOKUP_SHARED : LOOKUP_PRIVATE));
+            (TESTANY(FRAG_SHARED, flags) ? LOOKUP_SHARED : LOOKUP_PRIVATE),
+        variant);
 }
 
 #ifdef DEBUG /*currently only used for debugging */
@@ -2802,37 +2977,40 @@ fragment_pclookup_by_htable(dcontext_t *dcontext, cache_pc pc, fragment_t *wrapp
      * may want this regardless of performance -- see also XXX below.
      */
     fragment_t *f;
-    per_thread_t *pt = NULL;
-    if (dcontext != GLOBAL_DCONTEXT) {
-        pt = (per_thread_t *)dcontext->fragment_field;
-        /* look at private traces first */
-        if (PRIVATE_TRACES_ENABLED()) {
-            f = hashtable_pclookup(dcontext, &pt->trace, pc);
+    uint v;
+    for (v = 0; v < NUM_VARIANTS(); v++) {
+        per_thread_t *pt = NULL;
+        if (dcontext != GLOBAL_DCONTEXT) {
+            pt = GET_VARIANT_PT(dcontext, v);
+            /* look at private traces first */
+            if (PRIVATE_TRACES_ENABLED()) {
+                f = hashtable_pclookup(dcontext, &pt->trace, pc);
+                if (f != NULL)
+                    return f;
+            }
+        }
+        if (DYNAMO_OPTION(shared_traces)) {
+            /* then shared traces */
+            d_r_read_lock(&shared_trace[v].rwlock);
+            f = hashtable_pclookup(dcontext, &shared_trace[v], pc);
+            d_r_read_unlock(&shared_trace[v].rwlock);
             if (f != NULL)
                 return f;
         }
-    }
-    if (DYNAMO_OPTION(shared_traces)) {
-        /* then shared traces */
-        d_r_read_lock(&shared_trace->rwlock);
-        f = hashtable_pclookup(dcontext, shared_trace, pc);
-        d_r_read_unlock(&shared_trace->rwlock);
-        if (f != NULL)
-            return f;
-    }
-    if (DYNAMO_OPTION(shared_bbs)) {
-        /* then shared basic blocks */
-        d_r_read_lock(&shared_bb->rwlock);
-        f = hashtable_pclookup(dcontext, shared_bb, pc);
-        d_r_read_unlock(&shared_bb->rwlock);
-        if (f != NULL)
-            return f;
-    }
-    if (dcontext != GLOBAL_DCONTEXT) {
-        /* now private basic blocks */
-        f = hashtable_pclookup(dcontext, &pt->bb, pc);
-        if (f != NULL)
-            return f;
+        if (DYNAMO_OPTION(shared_bbs)) {
+            /* then shared basic blocks */
+            d_r_read_lock(&shared_bb[v].rwlock);
+            f = hashtable_pclookup(dcontext, &shared_bb[v], pc);
+            d_r_read_unlock(&shared_bb[v].rwlock);
+            if (f != NULL)
+                return f;
+        }
+        if (dcontext != GLOBAL_DCONTEXT) {
+            /* now private basic blocks */
+            f = hashtable_pclookup(dcontext, &pt->bb, pc);
+            if (f != NULL)
+                return f;
+        }
     }
     if (DYNAMO_OPTION(coarse_units)) {
         coarse_info_t *info = get_executable_area_coarse_info(pc);
@@ -2905,13 +3083,14 @@ fragment_pclookup_with_linkstubs(dcontext_t *dcontext, cache_pc pc,
 void
 fragment_add(dcontext_t *dcontext, fragment_t *f)
 {
-    per_thread_t *pt = (per_thread_t *)dcontext->fragment_field;
-    fragment_table_t *table = GET_FTABLE(pt, f->flags);
+    uint variant = FRAGMENT_VARIANT(f);
+    per_thread_t *pt = GET_VARIANT_PT(dcontext, variant);
+    fragment_table_t *table = GET_FTABLE(pt, f->flags, variant);
     /* no future frags! */
     ASSERT(!TESTANY(FRAG_IS_FUTURE, f->flags));
 
     DOCHECK(1, {
-        fragment_t *existing = fragment_lookup(dcontext, f->tag);
+        fragment_t *existing = fragment_lookup_variant(dcontext, f->tag, variant);
         ASSERT(
             existing == NULL ||
             /* For custom traces, we create and persist shadowed trace heads. */
@@ -3068,7 +3247,7 @@ fragment_delete(dcontext_t *dcontext, fragment_t *f, uint actions)
      */
     if (dr_fragment_deleted_hook_exists() &&
         (!TESTANY(FRAGDEL_NO_HEAP, actions) || !TESTANY(FRAGDEL_NO_FCACHE, actions)))
-        instrument_fragment_deleted(dcontext, f->tag, f->flags);
+        fragment_deleted_event(dcontext, f);
 #ifdef UNIX
     if (INTERNAL_OPTION(profile_pcs))
         pcprofile_fragment_deleted(dcontext, f);
@@ -3587,7 +3766,8 @@ fragment_prepare_for_removal(dcontext_t *dcontext, fragment_t *f)
         dcontext = get_thread_private_dcontext();
         ASSERT(dcontext != NULL);
     }
-    pt = GET_PT(dcontext);
+    /* f can only be in the tables of its own variant. */
+    pt = GET_VARIANT_PT(dcontext, FRAGMENT_VARIANT(f));
     /* XXX: as an optimization we could test if IS_IBL_TARGET() is
      * set before looking it up
      */
@@ -3687,7 +3867,7 @@ fragment_remove_from_ibt_tables(dcontext_t *dcontext, fragment_t *f, bool from_s
          * gather these independently */
         DEBUG_DECLARE(uint ibls_targeted = 0;)
         ibl_branch_type_t branch_type;
-        per_thread_t *pt = GET_PT(dcontext);
+        per_thread_t *pt = GET_VARIANT_PT(dcontext, FRAGMENT_VARIANT(f));
 
         ASSERT(TESTANY(FRAG_IS_TRACE, f->flags) || DYNAMO_OPTION(bb_ibl_targets));
         for (branch_type = IBL_BRANCH_TYPE_START; branch_type < IBL_BRANCH_TYPE_END;
@@ -3713,40 +3893,46 @@ fragment_remove_from_ibt_tables(dcontext_t *dcontext, fragment_t *f, bool from_s
     }
 }
 
-/* Removes ibl entries whose tags are in [start,end) */
+/* Removes ibl entries whose tags are in [start,end), from the tables of all
+ * fragment variants.
+ */
 static uint
 fragment_remove_ibl_entries_in_region(dcontext_t *dcontext, app_pc start, app_pc end,
                                       uint frag_flags)
 {
     uint total_removed = 0;
-    per_thread_t *pt = GET_PT(dcontext);
     ibl_branch_type_t branch_type;
-    ASSERT(pt != NULL);
+    uint v;
+    ASSERT(GET_PT(dcontext) != NULL);
     ASSERT(TESTANY(FRAG_IS_TRACE, frag_flags) || DYNAMO_OPTION(bb_ibl_targets));
     ASSERT(dcontext == get_thread_private_dcontext() || dynamo_all_threads_synched);
-    for (branch_type = IBL_BRANCH_TYPE_START; branch_type < IBL_BRANCH_TYPE_END;
-         branch_type++) {
-        ibl_table_t *ibtable = GET_IBT_TABLE(pt, frag_flags, branch_type);
-        uint removed = 0;
-        TABLE_RWLOCK(ibtable, write, lock);
-        if (ibtable->entries > 0) {
-            removed = hashtable_ibl_range_remove(dcontext, ibtable, (ptr_uint_t)start,
-                                                 (ptr_uint_t)end, NULL);
-            /* Ensure a full remove gets everything */
-            ASSERT(start != UNIVERSAL_REGION_BASE || end != UNIVERSAL_REGION_END ||
-                   (ibtable->entries == 0 &&
-                    is_region_memset_to_char(
-                        (app_pc)ibtable->table,
-                        (ibtable->capacity - 1) * sizeof(fragment_entry_t), 0)));
+    /* shared_pt only has variant 0 */
+    for (v = 0; v < (dcontext == GLOBAL_DCONTEXT ? 1 : NUM_VARIANTS()); v++) {
+        per_thread_t *pt = GET_VARIANT_PT(dcontext, v);
+        for (branch_type = IBL_BRANCH_TYPE_START; branch_type < IBL_BRANCH_TYPE_END;
+             branch_type++) {
+            ibl_table_t *ibtable = GET_IBT_TABLE(pt, frag_flags, branch_type);
+            uint removed = 0;
+            TABLE_RWLOCK(ibtable, write, lock);
+            if (ibtable->entries > 0) {
+                removed = hashtable_ibl_range_remove(dcontext, ibtable, (ptr_uint_t)start,
+                                                     (ptr_uint_t)end, NULL);
+                /* Ensure a full remove gets everything */
+                ASSERT(start != UNIVERSAL_REGION_BASE || end != UNIVERSAL_REGION_END ||
+                       (ibtable->entries == 0 &&
+                        is_region_memset_to_char(
+                            (app_pc)ibtable->table,
+                            (ibtable->capacity - 1) * sizeof(fragment_entry_t), 0)));
+            }
+            LOG(THREAD, LOG_FRAGMENT, 2,
+                "  removed %d entries (%d left) in " PFX "-" PFX " from IBT table %s\n",
+                removed, ibtable->entries, start, end,
+                TESTANY(FRAG_TABLE_TRACE, ibtable->table_flags)
+                    ? ibl_trace_table_type_names[branch_type]
+                    : ibl_bb_table_type_names[branch_type]);
+            TABLE_RWLOCK(ibtable, write, unlock);
+            total_removed += removed;
         }
-        LOG(THREAD, LOG_FRAGMENT, 2,
-            "  removed %d entries (%d left) in " PFX "-" PFX " from IBT table %s\n",
-            removed, ibtable->entries, start, end,
-            TESTANY(FRAG_TABLE_TRACE, ibtable->table_flags)
-                ? ibl_trace_table_type_names[branch_type]
-                : ibl_bb_table_type_names[branch_type]);
-        TABLE_RWLOCK(ibtable, write, unlock);
-        total_removed += removed;
     }
     return total_removed;
 }
@@ -3781,8 +3967,9 @@ fragment_remove_all_ibl_in_region(dcontext_t *dcontext, app_pc start, app_pc end
 void
 fragment_remove(dcontext_t *dcontext, fragment_t *f)
 {
-    per_thread_t *pt = GET_PT(dcontext);
-    fragment_table_t *table = GET_FTABLE(pt, f->flags);
+    uint variant = FRAGMENT_VARIANT(f);
+    per_thread_t *pt = GET_VARIANT_PT(dcontext, variant);
+    fragment_table_t *table = GET_FTABLE(pt, f->flags, variant);
 
     ASSERT(TESTANY(FRAG_SHARED, f->flags) || dcontext != GLOBAL_DCONTEXT);
     /* For consistency we remove entries from the IBT
@@ -3821,8 +4008,10 @@ fragment_remove(dcontext_t *dcontext, fragment_t *f)
 void
 fragment_replace(dcontext_t *dcontext, fragment_t *f, fragment_t *new_f)
 {
-    per_thread_t *pt = GET_PT(dcontext);
-    fragment_table_t *table = GET_FTABLE(pt, f->flags);
+    uint variant = FRAGMENT_VARIANT(f);
+    per_thread_t *pt = GET_VARIANT_PT(dcontext, variant);
+    fragment_table_t *table = GET_FTABLE(pt, f->flags, variant);
+    ASSERT(FRAGMENT_VARIANT(new_f) == variant);
     TABLE_RWLOCK(table, write, lock);
     if (hashtable_fragment_replace(f, new_f, table)) {
         fragment_entry_t fe = FRAGENTRY_FROM_FRAGMENT(f);
@@ -3858,7 +4047,7 @@ void
 fragment_shift_fcache_pointers(dcontext_t *dcontext, fragment_t *f, ssize_t shift,
                                cache_pc start, cache_pc end, size_t old_size)
 {
-    per_thread_t *pt = GET_PT(dcontext);
+    per_thread_t *pt = GET_VARIANT_PT(dcontext, FRAGMENT_VARIANT(f));
 
     IF_X64(ASSERT_NOT_IMPLEMENTED(false)); /* must re-relativize when copying! */
 
@@ -4112,7 +4301,10 @@ fragment_add_ibl_target_helper(dcontext_t *dcontext, fragment_t *f,
 void
 fragment_add_ibl_target(dcontext_t *dcontext, app_pc tag, ibl_branch_type_t branch_type)
 {
-    per_thread_t *pt = (per_thread_t *)dcontext->fragment_field;
+    /* The thread's lookup routines use the tables of its current variant, and the
+     * lookups below find fragments of that variant.
+     */
+    per_thread_t *pt = GET_VARIANT_PT(dcontext, CUR_VARIANT(dcontext));
     fragment_t *f = NULL;
     fragment_t wrapper;
 
@@ -4183,6 +4375,7 @@ fragment_add_ibl_target(dcontext_t *dcontext, app_pc tag, ibl_branch_type_t bran
     /* a valid IBT fragment exists */
     if (f != NULL) {
         ibl_table_t *ibl_table = GET_IBT_TABLE(pt, f->flags, branch_type);
+        ASSERT(FRAGMENT_VARIANT(f) == CUR_VARIANT(dcontext));
         DEBUG_DECLARE(fragment_entry_t *orig_lookuptable = NULL;)
         fragment_entry_t current;
 
@@ -4270,7 +4463,8 @@ fragment_add_ibl_target(dcontext_t *dcontext, app_pc tag, ibl_branch_type_t bran
                        TESTALL(FRAG_SHARED | FRAG_IS_TRACE_HEAD,
                                dcontext->last_fragment->flags) &&
                        fragment_lookup_type(dcontext, dcontext->last_fragment->tag,
-                                            LOOKUP_TRACE | LOOKUP_SHARED) != NULL) {
+                                            LOOKUP_TRACE | LOOKUP_SHARED,
+                                            CUR_VARIANT(dcontext)) != NULL) {
                 /* Another thread unlinked src as part of replacing it with
                  * a new trace while this thread was in there (see case 5634
                  * for details) */
@@ -4337,6 +4531,156 @@ fragment_add_ibl_target(dcontext_t *dcontext, app_pc tag, ibl_branch_type_t bran
 }
 
 /**********************************************************************/
+/* FRAGMENT VARIANTS
+ *
+ * With -num_fragment_variants N > 1, a client can keep N differently built and
+ * instrumented copies of the application's code.  Every fragment belongs to one
+ * variant (FRAGMENT_VARIANT()), which has its own fragment, future, and
+ * indirect branch target tables, shared and private.  A thread executes only the
+ * fragments of its current variant: its lookups by tag and its indirect branch
+ * lookup routines use that variant's tables, new fragments are built in it, and
+ * fragments only link to fragments of their own variant.  Regions are flushed
+ * through the vm area lists, which hold the fragments of all variants.
+ */
+
+uint
+fragment_num_variants(void)
+{
+    return NUM_VARIANTS();
+}
+
+/* Returns the variant whose fragments dcontext's thread executes. */
+uint
+fragment_current_variant(dcontext_t *dcontext)
+{
+    return CUR_VARIANT(dcontext);
+}
+
+/* Selects the variant that dcontext's thread switches to the next time d_r_dispatch()
+ * looks for a fragment for it to execute.  Returns false if variant is invalid.
+ */
+bool
+fragment_select_variant(dcontext_t *dcontext, uint variant)
+{
+    per_thread_t *pt = GET_PT(dcontext);
+    if (dcontext == GLOBAL_DCONTEXT || pt == NULL || variant >= NUM_VARIANTS())
+        return false;
+    pt->next_variant = variant;
+    return true;
+}
+
+/* Points the thread's indirect branch lookups at the tables of its current
+ * variant: in TLS if the lookup routines read them from there, otherwise via
+ * dcontext->fragment_ibt_field, from which the routines load the tables or which
+ * update_generated_hashtable_access() patches into thread-private routines.
+ */
+static void
+fragment_activate_variant_ibt_tables(dcontext_t *dcontext, per_thread_t *vpt)
+{
+    ibl_branch_type_t branch_type;
+    dcontext->fragment_ibt_field = (void *)vpt;
+    if (SHARED_IB_TARGETS() && DYNAMO_OPTION(ibl_table_in_tls)) {
+        /* Same conditions as in hashtable_ibl_init_internal_custom(). */
+        for (branch_type = IBL_BRANCH_TYPE_START; branch_type < IBL_BRANCH_TYPE_END;
+             branch_type++) {
+            ibl_table_t *table = NULL;
+            if (DYNAMO_OPTION(bb_ibl_targets) && SHARED_BB_ONLY_IB_TARGETS() &&
+                !DYNAMO_OPTION(shared_bb_ibt_tables))
+                table = &vpt->bb_ibt[branch_type];
+            else if ((!DYNAMO_OPTION(disable_traces) || !DYNAMO_OPTION(bb_ibl_targets)) &&
+                     !DYNAMO_OPTION(shared_trace_ibt_tables))
+                table = &vpt->trace_ibt[branch_type];
+            if (table == NULL)
+                continue;
+            TABLE_RWLOCK(table, read, lock);
+            update_lookuptable_tls(dcontext, table);
+            TABLE_RWLOCK(table, read, unlock);
+        }
+    }
+    update_generated_hashtable_access(dcontext);
+}
+
+/* Switches dcontext's thread to the variant selected by fragment_select_variant(),
+ * if that is not its current one.  Must be called by the thread itself when it is
+ * not in the code cache, before it looks for the next fragment to execute.
+ */
+void
+fragment_switch_to_selected_variant(dcontext_t *dcontext)
+{
+    per_thread_t *pt = (per_thread_t *)dcontext->fragment_field;
+    if (pt == NULL)
+        return;
+    if (pt->next_variant == pt->variant) {
+#ifdef WINDOWS
+        /* Callback dcontexts share pt but not fragment_ibt_field. */
+        if (dcontext->fragment_ibt_field != PT_VARIANT(pt, pt->variant))
+            fragment_activate_variant_ibt_tables(dcontext, PT_VARIANT(pt, pt->variant));
+#endif
+        return;
+    }
+    ASSERT(dcontext == get_thread_private_dcontext());
+    ASSERT(pt->next_variant < NUM_VARIANTS());
+    LOG(THREAD, LOG_DISPATCH | LOG_FRAGMENT, 2,
+        "switching from fragment variant %u to %u\n", pt->variant, pt->next_variant);
+    pt->variant = pt->next_variant;
+    pt->event_variant = pt->variant;
+    fragment_activate_variant_ibt_tables(dcontext, PT_VARIANT(pt, pt->variant));
+    STATS_INC(num_fragment_variant_switches);
+}
+
+/* Returns the variant of the fragment for which dcontext's thread is building a
+ * basic block or translating state (its current variant outside of those).
+ */
+uint
+fragment_event_variant(dcontext_t *dcontext)
+{
+    per_thread_t *pt;
+    if (dcontext == GLOBAL_DCONTEXT)
+        return global_event_variant;
+    pt = GET_PT(dcontext);
+    if (pt == NULL)
+        return 0;
+    return pt->event_variant;
+}
+
+/* Sets the variant returned by fragment_event_variant() and returns the previous
+ * value, which the caller must restore when done.
+ */
+uint
+fragment_set_event_variant(dcontext_t *dcontext, uint variant)
+{
+    per_thread_t *pt;
+    uint old;
+    ASSERT(variant < NUM_VARIANTS());
+    if (dcontext == GLOBAL_DCONTEXT) {
+        /* See global_event_variant: all threads are synchronized. */
+        old = global_event_variant;
+        global_event_variant = variant;
+        return old;
+    }
+    pt = GET_PT(dcontext);
+    if (pt == NULL)
+        return 0;
+    old = pt->event_variant;
+    pt->event_variant = variant;
+    return old;
+}
+
+/* Calls the client's fragment deletion event for f, for which
+ * dr_get_fragment_variant() returns the variant of f.
+ */
+static void
+fragment_deleted_event(dcontext_t *dcontext, fragment_t *f)
+{
+    uint old_variant = 0;
+    if (NUM_VARIANTS() > 1)
+        old_variant = fragment_set_event_variant(dcontext, FRAGMENT_VARIANT(f));
+    instrument_fragment_deleted(dcontext, f->tag, f->flags);
+    if (NUM_VARIANTS() > 1)
+        fragment_set_event_variant(dcontext, old_variant);
+}
+
+/**********************************************************************/
 /* FUTURE FRAGMENTS */
 
 /* create a new fragment with empty prefix and return it
@@ -4372,11 +4716,11 @@ fragment_free_future(dcontext_t *dcontext, future_fragment_t *fut)
 }
 
 future_fragment_t *
-fragment_create_and_add_future(dcontext_t *dcontext, app_pc tag, uint flags)
+fragment_create_and_add_future(dcontext_t *dcontext, app_pc tag, uint flags, uint variant)
 {
-    per_thread_t *pt = GET_PT(dcontext);
+    per_thread_t *pt = GET_VARIANT_PT(dcontext, variant);
     future_fragment_t *fut = fragment_create_future(dcontext, tag, flags);
-    fragment_table_t *futtable = GET_FTABLE(pt, fut->flags);
+    fragment_table_t *futtable = GET_FTABLE(pt, fut->flags, variant);
     ASSERT(!NEED_SHARED_LOCK(flags) || self_owns_recursive_lock(&change_linking_lock));
     /* adding to the table is a write operation */
     TABLE_RWLOCK(futtable, write, lock);
@@ -4386,10 +4730,10 @@ fragment_create_and_add_future(dcontext_t *dcontext, app_pc tag, uint flags)
 }
 
 void
-fragment_delete_future(dcontext_t *dcontext, future_fragment_t *fut)
+fragment_delete_future(dcontext_t *dcontext, future_fragment_t *fut, uint variant)
 {
-    per_thread_t *pt = GET_PT(dcontext);
-    fragment_table_t *futtable = GET_FTABLE(pt, fut->flags);
+    per_thread_t *pt = GET_VARIANT_PT(dcontext, variant);
+    fragment_table_t *futtable = GET_FTABLE(pt, fut->flags, variant);
     ASSERT(!NEED_SHARED_LOCK(fut->flags) ||
            self_owns_recursive_lock(&change_linking_lock));
     /* removing from the table is a write operation */
@@ -4410,32 +4754,36 @@ fragment_delete_future_filter(fragment_t *f)
     return (fut->incoming_stubs == NULL);
 }
 
+/* Removes futures in [start,end) from the tables of all fragment variants. */
 static uint
 fragment_delete_futures_in_region(dcontext_t *dcontext, app_pc start, app_pc end)
 {
-    per_thread_t *pt = GET_PT(dcontext);
     uint flags = FRAG_IS_FUTURE | (dcontext == GLOBAL_DCONTEXT ? FRAG_SHARED : 0);
-    fragment_table_t *futtable = GET_FTABLE(pt, flags);
-    uint removed;
+    uint removed = 0;
+    uint v;
     /* Higher-level lock needed since we do lookup+add w/o holding table lock between */
     ASSERT(!NEED_SHARED_LOCK(flags) || self_owns_recursive_lock(&change_linking_lock));
-    TABLE_RWLOCK(futtable, write, lock);
-    removed =
-        hashtable_fragment_range_remove(dcontext, futtable, (ptr_uint_t)start,
-                                        (ptr_uint_t)end, fragment_delete_future_filter);
-    TABLE_RWLOCK(futtable, write, unlock);
+    for (v = 0; v < NUM_VARIANTS(); v++) {
+        per_thread_t *pt = GET_VARIANT_PT(dcontext, v);
+        fragment_table_t *futtable = GET_FTABLE(pt, flags, v);
+        TABLE_RWLOCK(futtable, write, lock);
+        removed += hashtable_fragment_range_remove(dcontext, futtable, (ptr_uint_t)start,
+                                                   (ptr_uint_t)end,
+                                                   fragment_delete_future_filter);
+        TABLE_RWLOCK(futtable, write, unlock);
+    }
     return removed;
 }
 
 future_fragment_t *
-fragment_lookup_future(dcontext_t *dcontext, app_pc tag)
+fragment_lookup_future(dcontext_t *dcontext, app_pc tag, uint variant)
 {
     /* default is to lookup shared, since private only sometimes exists,
      * and often only care about trace head, for which always use shared
      */
     uint flags = SHARED_FRAGMENTS_ENABLED() ? FRAG_SHARED : 0;
-    per_thread_t *pt = GET_PT(dcontext);
-    fragment_table_t *futtable = GET_FTABLE(pt, FRAG_IS_FUTURE | flags);
+    per_thread_t *pt = GET_VARIANT_PT(dcontext, variant);
+    fragment_table_t *futtable = GET_FTABLE(pt, FRAG_IS_FUTURE | flags, variant);
     fragment_t *f;
     TABLE_RWLOCK(futtable, read, lock);
     f = hashtable_fragment_lookup(dcontext, (ptr_uint_t)tag, futtable);
@@ -4446,10 +4794,10 @@ fragment_lookup_future(dcontext_t *dcontext, app_pc tag)
 }
 
 future_fragment_t *
-fragment_lookup_private_future(dcontext_t *dcontext, app_pc tag)
+fragment_lookup_private_future(dcontext_t *dcontext, app_pc tag, uint variant)
 {
-    per_thread_t *pt = (per_thread_t *)dcontext->fragment_field;
-    fragment_table_t *futtable = GET_FTABLE(pt, FRAG_IS_FUTURE);
+    per_thread_t *pt = GET_VARIANT_PT(dcontext, variant);
+    fragment_table_t *futtable = GET_FTABLE(pt, FRAG_IS_FUTURE, variant);
     fragment_t *f = hashtable_fragment_lookup(dcontext, (ptr_uint_t)tag, futtable);
     if (f != &null_fragment)
         return (future_fragment_t *)f;
@@ -5297,36 +5645,39 @@ fragment_overlaps(dcontext_t *dcontext, fragment_t *f, byte *region_start,
 void
 study_all_hashtables(dcontext_t *dcontext)
 {
-    per_thread_t *pt = (per_thread_t *)dcontext->fragment_field;
     ibl_branch_type_t branch_type;
+    uint v;
 
-    for (branch_type = IBL_BRANCH_TYPE_START; branch_type < IBL_BRANCH_TYPE_END;
-         branch_type++) {
-        if (!DYNAMO_OPTION(disable_traces)) {
-            per_thread_t *ibl_pt = pt;
-            if (DYNAMO_OPTION(shared_trace_ibt_tables))
-                ibl_pt = shared_pt;
-            hashtable_ibl_study(dcontext, &ibl_pt->trace_ibt[branch_type],
-                                0 /*table consistent*/);
+    for (v = 0; v < NUM_VARIANTS(); v++) {
+        per_thread_t *pt = GET_VARIANT_PT(dcontext, v);
+        for (branch_type = IBL_BRANCH_TYPE_START; branch_type < IBL_BRANCH_TYPE_END;
+             branch_type++) {
+            if (!DYNAMO_OPTION(disable_traces)) {
+                per_thread_t *ibl_pt = pt;
+                if (DYNAMO_OPTION(shared_trace_ibt_tables))
+                    ibl_pt = shared_pt;
+                hashtable_ibl_study(dcontext, &ibl_pt->trace_ibt[branch_type],
+                                    0 /*table consistent*/);
+            }
+            if (DYNAMO_OPTION(bb_ibl_targets)) {
+                per_thread_t *ibl_pt = pt;
+                if (DYNAMO_OPTION(shared_bb_ibt_tables))
+                    ibl_pt = shared_pt;
+                hashtable_ibl_study(dcontext, &ibl_pt->bb_ibt[branch_type],
+                                    0 /*table consistent*/);
+            }
         }
-        if (DYNAMO_OPTION(bb_ibl_targets)) {
-            per_thread_t *ibl_pt = pt;
-            if (DYNAMO_OPTION(shared_bb_ibt_tables))
-                ibl_pt = shared_pt;
-            hashtable_ibl_study(dcontext, &ibl_pt->bb_ibt[branch_type],
-                                0 /*table consistent*/);
-        }
+        if (PRIVATE_TRACES_ENABLED())
+            hashtable_fragment_study(dcontext, &pt->trace, 0 /*table consistent*/);
+        hashtable_fragment_study(dcontext, &pt->bb, 0 /*table consistent*/);
+        hashtable_fragment_study(dcontext, &pt->future, 0 /*table consistent*/);
+        if (DYNAMO_OPTION(shared_bbs))
+            hashtable_fragment_study(dcontext, &shared_bb[v], 0 /*table consistent*/);
+        if (DYNAMO_OPTION(shared_traces))
+            hashtable_fragment_study(dcontext, &shared_trace[v], 0 /*table consistent*/);
+        if (SHARED_FRAGMENTS_ENABLED())
+            hashtable_fragment_study(dcontext, &shared_future[v], 0 /*table consistent*/);
     }
-    if (PRIVATE_TRACES_ENABLED())
-        hashtable_fragment_study(dcontext, &pt->trace, 0 /*table consistent*/);
-    hashtable_fragment_study(dcontext, &pt->bb, 0 /*table consistent*/);
-    hashtable_fragment_study(dcontext, &pt->future, 0 /*table consistent*/);
-    if (DYNAMO_OPTION(shared_bbs))
-        hashtable_fragment_study(dcontext, shared_bb, 0 /*table consistent*/);
-    if (DYNAMO_OPTION(shared_traces))
-        hashtable_fragment_study(dcontext, shared_trace, 0 /*table consistent*/);
-    if (SHARED_FRAGMENTS_ENABLED())
-        hashtable_fragment_study(dcontext, shared_future, 0 /*table consistent*/);
 #    ifdef RETURN_AFTER_CALL
     if (dynamo_options.ret_after_call && rac_non_module_table.live_table != NULL) {
         hashtable_app_pc_study(dcontext, rac_non_module_table.live_table,
@@ -5463,22 +5814,25 @@ check_flush_queue(dcontext_t *dcontext, fragment_t *was_I_flushed)
              INTERNAL_OPTION(rehash_unlinked_always))) {
 
             ibl_branch_type_t branch_type;
+            uint v;
 
-            for (branch_type = IBL_BRANCH_TYPE_START; branch_type < IBL_BRANCH_TYPE_END;
-                 branch_type++) {
+            for (v = 0; v < NUM_VARIANTS(); v++) {
+                for (branch_type = IBL_BRANCH_TYPE_START;
+                     branch_type < IBL_BRANCH_TYPE_END; branch_type++) {
 
-                ibl_table_t *table = &pt->bb_ibt[branch_type];
+                    ibl_table_t *table = &PT_VARIANT(pt, v)->bb_ibt[branch_type];
 
-                if (table->unlinked_entries > 0 &&
-                    (INTERNAL_OPTION(rehash_unlinked_threshold) <
-                         (100 * table->unlinked_entries /
-                          (table->unlinked_entries + table->entries)) ||
-                     INTERNAL_OPTION(rehash_unlinked_always))) {
-                    STATS_INC(num_ibt_table_rehashes);
-                    LOG(THREAD, LOG_FRAGMENT, 1,
-                        "Rehash table %s: linked %u, unlinked %u\n", table->name,
-                        table->entries, table->unlinked_entries);
-                    hashtable_ibl_unlinked_remove(dcontext, table);
+                    if (table->unlinked_entries > 0 &&
+                        (INTERNAL_OPTION(rehash_unlinked_threshold) <
+                             (100 * table->unlinked_entries /
+                              (table->unlinked_entries + table->entries)) ||
+                         INTERNAL_OPTION(rehash_unlinked_always))) {
+                        STATS_INC(num_ibt_table_rehashes);
+                        LOG(THREAD, LOG_FRAGMENT, 1,
+                            "Rehash table %s: linked %u, unlinked %u\n", table->name,
+                            table->entries, table->unlinked_entries);
+                        hashtable_ibl_unlinked_remove(dcontext, table);
+                    }
                 }
             }
         }
@@ -6235,17 +6589,19 @@ flush_fragments_thread_unlink(dcontext_t *dcontext, int thread_index,
     });
 
     if (flush_size > 0 && flush_tag != NULL) {
-        /* unlink just the private fragments with the tag */
+        /* unlink just the private fragments with the tag, in every fragment variant */
         uint lookup_flags[] = { LOOKUP_TRACE | LOOKUP_PRIVATE,
                                 LOOKUP_BB | LOOKUP_PRIVATE };
-        uint i;
+        uint i, v;
         tgt_pt->flush_queue_nonempty = true;
-        for (i = 0; i < BUFFER_SIZE_ELEMENTS(lookup_flags); i++) {
-            fragment_t *f =
-                fragment_lookup_type(tgt_dcontext, flush_tag, lookup_flags[i]);
-            if (f != NULL && !TESTANY(FRAG_SHARED, f->flags)) {
-                vm_area_unlink_private_fragment(tgt_dcontext, f);
-                DODEBUG({ num_flushed++; });
+        for (v = 0; v < NUM_VARIANTS(); v++) {
+            for (i = 0; i < BUFFER_SIZE_ELEMENTS(lookup_flags); i++) {
+                fragment_t *f =
+                    fragment_lookup_type(tgt_dcontext, flush_tag, lookup_flags[i], v);
+                if (f != NULL && !TESTANY(FRAG_SHARED, f->flags)) {
+                    vm_area_unlink_private_fragment(tgt_dcontext, f);
+                    DODEBUG({ num_flushed++; });
+                }
             }
         }
     } else if (flush_size > 0) {
@@ -6900,7 +7256,8 @@ flush_fragments_from_region(dcontext_t *dcontext, app_pc base, size_t size,
 /* Flushes like flush_fragments_from_region() does without forcing a synchall flush,
  * but only some of the fragments: if tag is NULL, the fragments that may contain
  * code from [base, base + size), rather than all fragments of the vm areas the region
- * overlaps; else the fragments whose tag is tag (base and size are then ignored).
+ * overlaps; else the fragments whose tag is tag, in every fragment variant (base and
+ * size are then ignored).
  * Does not change the executable areas.  Regions overlapping coarse-grain units, which
  * can only be flushed whole, are flushed as flush_fragments_from_region() does.
  * The caller must be !couldbelinking and hold no locks.
@@ -6940,16 +7297,20 @@ flush_fragments_exact(dcontext_t *dcontext, app_pc base, size_t size, app_pc tag
     if (tag != NULL) {
         fragment_t *list = NULL;
         if (SHARED_FRAGMENTS_ENABLED() && !RUNNING_WITHOUT_CODE_CACHE()) {
+            /* The shared fragments with the tag, in every fragment variant. */
             uint lookup_flags[] = { LOOKUP_TRACE | LOOKUP_SHARED,
                                     LOOKUP_BB | LOOKUP_SHARED };
-            uint i;
-            for (i = 0; i < BUFFER_SIZE_ELEMENTS(lookup_flags); i++) {
-                fragment_t *f = fragment_lookup_type(dcontext, tag, lookup_flags[i]);
-                if (f != NULL) {
-                    ASSERT(TESTANY(FRAG_SHARED, f->flags));
-                    vm_area_remove_fragment(dcontext, f);
-                    f->next_vmarea = list;
-                    list = f;
+            uint i, v;
+            for (v = 0; v < NUM_VARIANTS(); v++) {
+                for (i = 0; i < BUFFER_SIZE_ELEMENTS(lookup_flags); i++) {
+                    fragment_t *f =
+                        fragment_lookup_type(dcontext, tag, lookup_flags[i], v);
+                    if (f != NULL) {
+                        ASSERT(TESTANY(FRAG_SHARED, f->flags));
+                        vm_area_remove_fragment(dcontext, f);
+                        f->next_vmarea = list;
+                        list = f;
+                    }
                 }
             }
         }
@@ -8197,10 +8558,12 @@ fragment_lookup_fine_and_coarse(dcontext_t *dcontext, app_pc tag, fragment_t *wr
 fragment_t *
 fragment_lookup_fine_and_coarse_sharing(dcontext_t *dcontext, app_pc tag,
                                         fragment_t *wrapper, linkstub_t *last_exit,
-                                        uint share_flags)
+                                        uint share_flags, uint variant)
 {
-    fragment_t *res = fragment_lookup_same_sharing(dcontext, tag, share_flags);
+    fragment_t *res = fragment_lookup_same_sharing(dcontext, tag, share_flags, variant);
     if (DYNAMO_OPTION(coarse_units) && TESTANY(FRAG_SHARED, share_flags)) {
+        /* Coarse-grain units are not supported with fragment variants. */
+        ASSERT(variant == 0);
         ASSERT(wrapper != NULL);
         if (res == NULL) {
             res = fragment_coarse_lookup_wrapper(dcontext, tag, wrapper);
