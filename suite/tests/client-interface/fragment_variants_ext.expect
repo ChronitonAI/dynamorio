@@ -1,0 +1,8 @@
+fault in variant 0 (not passed to the bb event): pc ok, registers ok
+fault in variant 0 (passed to the bb event): pc ok, registers ok
+fault in variant 1 (drbbdup and drreg): pc ok, registers ok
+fault in variant 1 (drbbdup and drreg, marked): pc ok, registers ok
+blocks of marked() and plain() built in each variant: 2 2
+client errors: 0
+0 errors
+client: 0 errors

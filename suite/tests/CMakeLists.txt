@@ -2949,6 +2949,22 @@ if (X86 AND X64 AND LINUX) # The app and client use x86-64 asm and registers.
   torunonly_ci(client.fragment_variants.thread_private client.fragment_variants
     client.fragment_variants.dll client-interface/fragment_variants.c "-unlink_flush"
     "-num_fragment_variants 3 -thread_private" "")
+  tobuild_ci(client.fragment_variants_flush client-interface/fragment_variants_flush.c
+    "" "-num_fragment_variants 2" "")
+  set(client.fragment_variants_flush.thread_private_expectbase "fragment_variants_flush")
+  torunonly_ci(client.fragment_variants_flush.thread_private
+    client.fragment_variants_flush client.fragment_variants_flush.dll
+    client-interface/fragment_variants_flush.c ""
+    "-num_fragment_variants 2 -thread_private" "")
+  tobuild_ci(client.fragment_variants_ext client-interface/fragment_variants_ext.c ""
+    "-num_fragment_variants 2" "")
+  use_DynamoRIO_extension(client.fragment_variants_ext.dll drmgr)
+  use_DynamoRIO_extension(client.fragment_variants_ext.dll drreg)
+  use_DynamoRIO_extension(client.fragment_variants_ext.dll drbbdup)
+  set(client.fragment_variants_ext.thread_private_expectbase "fragment_variants_ext")
+  torunonly_ci(client.fragment_variants_ext.thread_private client.fragment_variants_ext
+    client.fragment_variants_ext.dll client-interface/fragment_variants_ext.c ""
+    "-num_fragment_variants 2 -thread_private" "")
 endif ()
 if (X86 OR AARCH64) # XXX i#1551: port asm to ARM
   tobuild_ci(client.strace client-interface/strace.c "" "" "")
