@@ -7086,6 +7086,7 @@ dr_flush_fragments(void *drcontext, void *curr_tag, void *flush_tag)
     /* We avoid "local unprotected" as it is global, complicating thread exit. */
     flush = HEAP_TYPE_ALLOC(dcontext, client_flush_req_t, ACCT_CLIENT, PROTECTED);
     flush->flush_callback = NULL;
+    flush->exact = false;
     if (flush_tag == NULL) {
         flush->start = UNIVERSAL_REGION_BASE;
         flush->size = UNIVERSAL_REGION_SIZE;
@@ -7177,12 +7178,17 @@ DR_API
 bool
 dr_unlink_flush_region(app_pc start, size_t size)
 {
-    dcontext_t *dcontext = get_thread_private_dcontext();
+    return dr_unlink_flush_region_ex(start, size, 0);
+}
+
+/* Checks the requirements of the unlink flush routines: returns whether the flush can
+ * go ahead.
+ */
+static bool
+unlink_flush_allowed(dcontext_t *dcontext)
+{
     CLIENT_ASSERT(!standalone_library, "API not supported in standalone mode");
     ASSERT(dcontext != NULL);
-
-    LOG(THREAD, LOG_FRAGMENT, 2, "%s: " PFX "-" PFX "\n", __FUNCTION__, start,
-        start + size);
 
     /* This routine won't work with coarse_units */
     CLIENT_ASSERT(!DYNAMO_OPTION(coarse_units),
@@ -7206,18 +7212,57 @@ dr_unlink_flush_region(app_pc start, size_t size)
                   "dr_flush_region: caller owns a client "
                   "lock or was called from an event callback that doesn't support "
                   "calling this routine, see header file for restrictions.");
-    CLIENT_ASSERT(size != 0, "dr_unlink_flush_region: 0 is invalid size for flush");
 
     /* release build check of requirements, as many as possible at least */
-    if (size == 0 || is_couldbelinking(dcontext))
+    return !is_couldbelinking(dcontext);
+}
+
+DR_API
+bool
+dr_unlink_flush_region_ex(app_pc start, size_t size, dr_flush_flags_t flags)
+{
+    dcontext_t *dcontext = get_thread_private_dcontext();
+
+    LOG(THREAD, LOG_FRAGMENT, 2, "%s: " PFX "-" PFX " 0x%x\n", __FUNCTION__, start,
+        start + size, flags);
+
+    CLIENT_ASSERT(size != 0, "dr_unlink_flush_region: 0 is invalid size for flush");
+    CLIENT_ASSERT(!TESTANY(~DR_FLUSH_EXACT, flags),
+                  "dr_unlink_flush_region_ex: invalid flags");
+    if (!unlink_flush_allowed(dcontext) || size == 0)
         return false;
 
     if (!executable_vm_area_executed_from(start, start + size))
         return true;
 
-    flush_fragments_from_region(dcontext, start, size, false /*don't force synchall*/,
-                                THREAD_SYNCH_NO_LOCKS_NO_XFER,
-                                NULL /*flush_completion_callback*/, NULL /*user_data*/);
+    if (TESTANY(DR_FLUSH_EXACT, flags))
+        flush_fragments_exact(dcontext, start, size, NULL);
+    else {
+        flush_fragments_from_region(dcontext, start, size, false /*don't force synchall*/,
+                                    THREAD_SYNCH_NO_LOCKS_NO_XFER,
+                                    NULL /*flush_completion_callback*/,
+                                    NULL /*user_data*/);
+    }
+
+    return true;
+}
+
+DR_API
+bool
+dr_unlink_flush_fragment(void *drcontext, void *tag)
+{
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
+
+    CLIENT_ASSERT(dcontext == get_thread_private_dcontext(),
+                  "dr_unlink_flush_fragment: drcontext must be the current thread's");
+    CLIENT_ASSERT(tag != NULL, "dr_unlink_flush_fragment: invalid tag");
+    if (dcontext != get_thread_private_dcontext() || !unlink_flush_allowed(dcontext))
+        return false;
+
+    LOG(THREAD, LOG_FRAGMENT, 2, "%s: " PFX "\n", __FUNCTION__, tag);
+
+    if (tag != NULL)
+        flush_fragments_exact(dcontext, NULL, 0, (app_pc)tag);
 
     return true;
 }
@@ -7233,15 +7278,25 @@ bool
 dr_delay_flush_region(app_pc start, size_t size, uint flush_id,
                       void (*flush_completion_callback)(int flush_id))
 {
+    return dr_delay_flush_region_ex(start, size, 0, flush_id, flush_completion_callback);
+}
+
+DR_API
+bool
+dr_delay_flush_region_ex(app_pc start, size_t size, dr_flush_flags_t flags, uint flush_id,
+                         void (*flush_completion_callback)(int flush_id))
+{
     client_flush_req_t *flush;
 
-    LOG(THREAD_GET, LOG_FRAGMENT, 2, "%s: " PFX "-" PFX "\n", __FUNCTION__, start,
-        start + size);
+    LOG(THREAD_GET, LOG_FRAGMENT, 2, "%s: " PFX "-" PFX " 0x%x\n", __FUNCTION__, start,
+        start + size, flags);
 
     if (size == 0) {
         CLIENT_ASSERT(false, "dr_delay_flush_region: 0 is invalid size for flush");
         return false;
     }
+    CLIENT_ASSERT(!TESTANY(~DR_FLUSH_EXACT, flags),
+                  "dr_delay_flush_region_ex: invalid flags");
 
     /* With the new module load event at 1st execution (i#884), we get a lot of
      * flush requests during creation of a bb from things like drwrap_replace().
@@ -7262,6 +7317,7 @@ dr_delay_flush_region(app_pc start, size_t size, uint flush_id,
     flush->size = size;
     flush->flush_id = flush_id;
     flush->flush_callback = flush_completion_callback;
+    flush->exact = TESTANY(DR_FLUSH_EXACT, flags);
 
     d_r_mutex_lock(&client_flush_request_lock);
     flush->next = client_flush_requests;

@@ -96,6 +96,13 @@ DECLARE_FREQPROT_VAR(static dcontext_t *allsynch_flusher, NULL);
 /* Current flush base and size, protected by thread_initexit_lock. */
 DECLARE_FREQPROT_VAR(static app_pc flush_base, NULL);
 DECLARE_FREQPROT_VAR(static size_t flush_size, 0);
+/* Whether the current flush flushes only the fragments that may contain code from the
+ * region, rather than all fragments of the vm areas overlapping it, and, if not NULL,
+ * the one tag whose fragments it flushes (see flush_fragments_exact()).  Protected by
+ * thread_initexit_lock.
+ */
+DECLARE_FREQPROT_VAR(static bool flush_exact, false);
+DECLARE_FREQPROT_VAR(static app_pc flush_tag, NULL);
 
 /* These global tables are kept on the heap for selfprot (case 7957) */
 
@@ -5617,7 +5624,12 @@ process_client_flush_requests(dcontext_t *dcontext, dcontext_t *alloc_dcontext,
              * don't have lazy linking (xref case 2236) */
             /* XXX - if there's more then one of these would be nice to batch them
              * especially for the synch all ones. */
-            if (iter->flush_callback != NULL) {
+            if (iter->exact) {
+                ASSERT_OWN_NO_LOCKS();
+                flush_fragments_exact(dcontext, iter->start, iter->size, NULL);
+                if (iter->flush_callback != NULL)
+                    (*iter->flush_callback)(iter->flush_id);
+            } else if (iter->flush_callback != NULL) {
                 /* XXX - for implementation simplicity we do a synch-all flush so
                  * that we can inform the client right away, it might be nice to use
                  * the more performant regular flush when possible. */
@@ -6222,14 +6234,30 @@ flush_fragments_thread_unlink(dcontext_t *dcontext, int thread_index,
         }
     });
 
-    if (flush_size > 0) {
-        /* unlink all frags in overlapping regions, and mark regions for deletion */
+    if (flush_size > 0 && flush_tag != NULL) {
+        /* unlink just the private fragments with the tag */
+        uint lookup_flags[] = { LOOKUP_TRACE | LOOKUP_PRIVATE,
+                                LOOKUP_BB | LOOKUP_PRIVATE };
+        uint i;
+        tgt_pt->flush_queue_nonempty = true;
+        for (i = 0; i < BUFFER_SIZE_ELEMENTS(lookup_flags); i++) {
+            fragment_t *f =
+                fragment_lookup_type(tgt_dcontext, flush_tag, lookup_flags[i]);
+            if (f != NULL && !TESTANY(FRAG_SHARED, f->flags)) {
+                vm_area_unlink_private_fragment(tgt_dcontext, f);
+                DODEBUG({ num_flushed++; });
+            }
+        }
+    } else if (flush_size > 0) {
+        /* unlink all frags in overlapping regions, and mark regions for deletion
+         * (or with flush_exact only those with code from the region)
+         */
         tgt_pt->flush_queue_nonempty = true;
 #ifdef DEBUG
         num_flushed +=
 #endif
-            vm_area_unlink_fragments(tgt_dcontext, flush_base, flush_base + flush_size,
-                                     0 _IF_DGCDIAG(written_pc));
+            vm_area_unlink_fragments(tgt_dcontext, flush_base, flush_base + flush_size, 0,
+                                     flush_exact _IF_DGCDIAG(written_pc));
     }
 
     return false; /* false: syscalls remain unlinked until vm_area_flush_fragments */
@@ -6567,9 +6595,9 @@ flush_fragments_unlink_shared(dcontext_t *dcontext, app_pc base, size_t size,
          * fragments from private/shared ibl tables
          */
         if (list == NULL) {
-            shared_flushed =
-                vm_area_unlink_fragments(GLOBAL_DCONTEXT, base, base + size,
-                                         pending_delete_threads _IF_DGCDIAG(written_pc));
+            shared_flushed = vm_area_unlink_fragments(
+                GLOBAL_DCONTEXT, base, base + size, pending_delete_threads,
+                flush_exact _IF_DGCDIAG(written_pc));
         } else {
             shared_flushed = unlink_fragments_for_deletion(GLOBAL_DCONTEXT, list,
                                                            pending_delete_threads);
@@ -6867,6 +6895,73 @@ flush_fragments_from_region(dcontext_t *dcontext, app_pc base, size_t size,
     }
 
     flush_fragments_in_region_finish(dcontext, false);
+}
+
+/* Flushes like flush_fragments_from_region() does without forcing a synchall flush,
+ * but only some of the fragments: if tag is NULL, the fragments that may contain
+ * code from [base, base + size), rather than all fragments of the vm areas the region
+ * overlaps; else the fragments whose tag is tag (base and size are then ignored).
+ * Does not change the executable areas.  Regions overlapping coarse-grain units, which
+ * can only be flushed whole, are flushed as flush_fragments_from_region() does.
+ * The caller must be !couldbelinking and hold no locks.
+ */
+void
+flush_fragments_exact(dcontext_t *dcontext, app_pc base, size_t size, app_pc tag)
+{
+    ASSERT(!is_self_couldbelinking());
+    ASSERT_OWN_NO_LOCKS();
+    if (tag != NULL) {
+        base = tag;
+        size = 1;
+    }
+    ASSERT(size > 0);
+    LOG(THREAD, LOG_FRAGMENT, 2, "%s: " PFX "-" PFX " tag " PFX "\n", __FUNCTION__, base,
+        base + size, tag);
+    if (!executable_vm_area_executed_from(base, base + size)) {
+        STATS_INC(num_noncode_flushes);
+        return;
+    }
+    if (executable_vm_area_coarse_overlap(base, base + size)) {
+        flush_fragments_from_region(dcontext, base, size, false /*don't force synchall*/,
+                                    THREAD_SYNCH_NO_LOCKS_NO_XFER,
+                                    NULL /*flush_completion_callback*/,
+                                    NULL /*user_data*/);
+        return;
+    }
+    KSTART(flush_region);
+    STATS_INC(num_flushes);
+    /* The flush's mode is protected by the thread_initexit_lock, like its region. */
+    d_r_mutex_lock(&thread_initexit_lock);
+    flush_exact = true;
+    flush_tag = tag;
+    /* Stage 1 unlinks the private fragments (see flush_fragments_thread_unlink()). */
+    flush_fragments_synch_priv(dcontext, base, size, true /*own initexit lock*/,
+                               flush_fragments_thread_unlink _IF_DGCDIAG(NULL));
+    if (tag != NULL) {
+        fragment_t *list = NULL;
+        if (SHARED_FRAGMENTS_ENABLED() && !RUNNING_WITHOUT_CODE_CACHE()) {
+            uint lookup_flags[] = { LOOKUP_TRACE | LOOKUP_SHARED,
+                                    LOOKUP_BB | LOOKUP_SHARED };
+            uint i;
+            for (i = 0; i < BUFFER_SIZE_ELEMENTS(lookup_flags); i++) {
+                fragment_t *f = fragment_lookup_type(dcontext, tag, lookup_flags[i]);
+                if (f != NULL) {
+                    ASSERT(TESTANY(FRAG_SHARED, f->flags));
+                    vm_area_remove_fragment(dcontext, f);
+                    f->next_vmarea = list;
+                    list = f;
+                }
+            }
+        }
+        flush_fragments_unlink_shared(dcontext, EMPTY_REGION_BASE, EMPTY_REGION_SIZE,
+                                      list _IF_DGCDIAG(NULL));
+    } else {
+        flush_fragments_unlink_shared(dcontext, base, size, NULL _IF_DGCDIAG(NULL));
+    }
+    flush_exact = false;
+    flush_tag = NULL;
+    flush_fragments_end_synch(dcontext, false /*don't keep initexit lock*/);
+    KSTOP(flush_region);
 }
 
 /* Invalidate all fragments in all caches.  Currently executed

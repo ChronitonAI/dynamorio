@@ -61,6 +61,9 @@
 #endif
 
 #include "instrument.h"
+#ifdef ANNOTATIONS
+#    include "annotations.h"
+#endif
 
 #ifdef DEBUG
 #    include "synch.h" /* all_threads_synch_lock */
@@ -229,6 +232,12 @@ typedef struct thread_data_t {
 #ifdef PROGRAM_SHEPHERDING
     uint thrown_exceptions; /* number of responses to execution violations */
 #endif
+    /* Private fragments that a flush unlinked individually, rather than with all of
+     * the fragments of their vm area (which is then marked VM_DELETE_ME), chained by
+     * next_vmarea: vm_area_flush_fragments() deletes them.  Only set in thread-private
+     * structures.
+     */
+    fragment_t *unlinked_frags;
 } thread_data_t;
 
 #define SHOULD_LOCK_VECTOR(v)                                                      \
@@ -9444,10 +9453,204 @@ unlink_fragments_for_deletion(dcontext_t *dcontext, fragment_t *list,
     return num;
 }
 
+/* An upper bound on the distance from the start of a basic block to the end of its
+ * application code when DR elides no direct branches: DR ends a block after
+ * -max_bb_instrs instructions, or after a few more (e.g., to finish an IT block).
+ */
+#define MAX_BB_APP_SPAN() ((DYNAMO_OPTION(max_bb_instrs) + 16) * MAX_INSTR_LENGTH)
+
+/* Returns whether the basic block that DR built at tag may contain application code
+ * from [start, end), for blocks of contiguous code.  Walks the block's code from tag
+ * to start and so relies on the code before start being the code the block was built
+ * from, while the code in [start, end) may have changed since.  Errs on the side of
+ * true.
+ */
+static bool
+app_bb_may_overlap_region(dcontext_t *dcontext, app_pc tag, app_pc start, app_pc end)
+{
+    byte buf[128 + MAX_INSTR_LENGTH];
+    app_pc buf_pc = NULL;
+    size_t buf_len = 0;
+    app_pc pc = tag;
+    instr_t instr;
+    bool overlap = true;
+    if (tag >= end)
+        return false;
+    if (tag >= start)
+        return true;
+    if ((size_t)(start - tag) >= MAX_BB_APP_SPAN())
+        return false;
+#ifdef AARCH64
+    /* Such blocks continue beyond the branches in exclusive-monitor sequences. */
+    if (INTERNAL_OPTION(unsafe_build_ldstex))
+        return true;
+#endif
+    instr_init(dcontext, &instr);
+    while (pc < start) {
+        byte *copy, *next;
+        if (pc + MAX_INSTR_LENGTH > buf_pc + buf_len) {
+            /* An instruction that starts before start can extend beyond it. */
+            buf_len = MIN(sizeof(buf), (size_t)(start - pc) + MAX_INSTR_LENGTH);
+            if (!d_r_safe_read(pc, buf_len, buf))
+                break;
+            buf_pc = pc;
+        }
+        copy = buf + (pc - buf_pc);
+        instr_reset(dcontext, &instr);
+        next = decode_cti(dcontext, copy, &instr);
+        if (next == NULL || pc + (next - copy) > start)
+            break;
+        if (instr_opcode_valid(&instr) && instr_is_cti(&instr)) {
+#ifdef ANNOTATIONS
+            /* DR continues a block beyond a jump over an annotation. */
+            instr_set_translation(&instr, copy);
+            if (is_annotation_jump_over_dead_code(&instr))
+                break;
+#endif
+            /* The block ends here, before start. */
+            overlap = false;
+            break;
+        }
+        pc += next - copy;
+    }
+    instr_free(dcontext, &instr);
+    return overlap;
+}
+
+/* Returns the tag of the i-th basic block of fragment f. */
+static inline app_pc
+fragment_bb_tag(fragment_t *f, uint i)
+{
+    return TESTANY(FRAG_IS_TRACE, f->flags) ? TRACE_FIELDS(f)->bbs[i].tag : f->tag;
+}
+
+/* Returns whether fragment f may contain application code from [start, end), without
+ * treating all of the fragments of a vm area overlapping the region as overlapping it.
+ * Errs on the side of true.
+ */
+static bool
+fragment_may_overlap_region(fragment_t *f, app_pc start, app_pc end)
+{
+#ifdef WINDOWS
+    /* Blocks can include code from interception buffers and continue after
+     * system calls elsewhere.
+     */
+    return true;
+#else
+    uint num_bbs = TESTANY(FRAG_IS_TRACE, f->flags) ? TRACE_FIELDS(f)->num_bbs : 1;
+    size_t span = MAX_BB_APP_SPAN();
+    dcontext_t *dcontext;
+    dr_isa_mode_t old_mode;
+    bool overlap = false, near = false;
+    uint i;
+    /* An elided direct branch makes the code of a block discontiguous. */
+    if (DYNAMO_OPTION(max_elide_jmp) > 0 || DYNAMO_OPTION(max_elide_call) > 0)
+        return true;
+    /* Most fragments of an area start far from the region: their tags suffice. */
+    for (i = 0; i < num_bbs; i++) {
+        app_pc tag = fragment_bb_tag(f, i);
+        if (tag >= start && tag < end)
+            return true;
+        if (tag < start && (size_t)(start - tag) < span)
+            near = true;
+    }
+    if (!near)
+        return false;
+    dcontext = get_thread_private_dcontext();
+    if (dcontext == NULL)
+        return true;
+    dr_set_isa_mode(dcontext, FRAG_ISA_MODE(f->flags), &old_mode);
+    for (i = 0; i < num_bbs && !overlap; i++) {
+        overlap = app_bb_may_overlap_region(dcontext, fragment_bb_tag(f, i), start, end);
+    }
+    dr_set_isa_mode(dcontext, old_mode, NULL);
+    return overlap;
+#endif
+}
+
+/* Unlinks the live fragment f, which the caller found on a vm area list of data, for
+ * deletion, after removing all of its vm area list entries.  A shared f is added to
+ * *list, chained by next_vmarea, for the caller to add to the pending-deletion list; a
+ * private f is added to data's list of fragments to delete.
+ */
+static void
+vm_area_unlink_one_fragment(dcontext_t *dcontext, thread_data_t *data, fragment_t *f,
+                            fragment_t **list)
+{
+    ASSERT(!TESTANY(FRAG_WAS_DELETED | FRAG_COARSE_GRAIN, f->flags));
+    ASSERT(!FRAG_MULTI(f));
+    LOG(THREAD_GET, LOG_FRAGMENT | LOG_VMAREAS, 5, "\tunlinking F%d(" PFX ")\n", f->id,
+        f->tag);
+    vm_area_remove_fragment(dcontext, f);
+    if (data == shared_data && SHARED_IB_TARGETS()) {
+        /* Invalidate shared targets from all threads' ibl tables (if private) or from
+         * the shared ibl tables.
+         */
+        flush_invalidate_ibl_shared_target(dcontext, f);
+    }
+    fragment_unlink_for_deletion(dcontext, f);
+    if (data == shared_data) {
+        f->next_vmarea = *list;
+        *list = f;
+    } else {
+        f->next_vmarea = data->unlinked_frags;
+        data->unlinked_frags = f;
+    }
+}
+
+void
+vm_area_unlink_private_fragment(dcontext_t *dcontext, fragment_t *f)
+{
+    thread_data_t *data = GET_DATA(dcontext, 0);
+    ASSERT(data != shared_data && !TESTANY(FRAG_SHARED, f->flags));
+    vm_area_unlink_one_fragment(dcontext, data, f, NULL);
+}
+
+/* Unlinks for deletion the fragments of area, which overlaps [start, end) but is not
+ * contained in it, that may contain code from [start, end), leaving the area and its
+ * other fragments in place.  See vm_area_unlink_one_fragment() for list.  Returns the
+ * number of fragments unlinked.
+ */
+static int
+vm_area_unlink_fragments_in_region(dcontext_t *dcontext, thread_data_t *data,
+                                   vm_area_t *area, app_pc start, app_pc end,
+                                   fragment_t **list)
+{
+    fragment_t *entry, *next;
+    int num = 0;
+    if (TESTANY(VM_DELETE_ME, area->vm_flags)) {
+        /* An earlier flush already unlinked all of its fragments. */
+        return 0;
+    }
+    /* i#942: our iteration relies on no fragment having two entries in the list. */
+    DOCHECK(CHKLVL_DEFAULT, { vm_area_check_clean_fraglist(area); });
+    ASSERT(!TESTANY(FRAG_COARSE_GRAIN, area->frag_flags));
+    for (entry = area->custom.frags; entry != NULL; entry = next) {
+        fragment_t *f = FRAG_FRAG(entry);
+        next = FRAG_NEXT(entry);
+        if (FRAG_MULTI_INIT(entry)) {
+            ASSERT(false && "stale multi-init entry on frags list");
+            vm_area_remove_fragment(dcontext, entry);
+            continue;
+        }
+        if (TESTANY(FRAG_WAS_DELETED, f->flags)) {
+            ASSERT_CURIOSITY(data != shared_data);
+            continue;
+        }
+        if (!fragment_may_overlap_region(f, start, end))
+            continue;
+        /* This removes entry (and no other entry of this list) and may free it. */
+        vm_area_unlink_one_fragment(dcontext, data, f, list);
+        num++;
+    }
+    return num;
+}
+
 /* returns the number of fragments unlinked */
 int
 vm_area_unlink_fragments(dcontext_t *dcontext, app_pc start, app_pc end,
-                         int pending_delete_threads _IF_DGCDIAG(app_pc written_pc))
+                         int pending_delete_threads,
+                         bool exact _IF_DGCDIAG(app_pc written_pc))
 {
     /* dcontext is for another thread, so don't use THREAD to log.  Cache the
      * logfile instead of repeatedly calling THREAD_GET.
@@ -9455,6 +9658,8 @@ vm_area_unlink_fragments(dcontext_t *dcontext, app_pc start, app_pc end,
     LOG_DECLARE(file_t thread_log = get_thread_private_logfile();)
     thread_data_t *data = GET_DATA(dcontext, 0);
     fragment_t *entry, *next;
+    /* Shared fragments unlinked individually (in exact mode). */
+    fragment_t *unlinked = NULL;
     int num = 0, i;
     if (data == shared_data) {
         /* we also need to add to the deletion list */
@@ -9480,7 +9685,8 @@ vm_area_unlink_fragments(dcontext_t *dcontext, app_pc start, app_pc end,
     }
 
     LOG(thread_log, LOG_FRAGMENT | LOG_VMAREAS, 2,
-        "vm_area_unlink_fragments " PFX ".." PFX "\n", start, end);
+        "vm_area_unlink_fragments " PFX ".." PFX "%s\n", start, end,
+        exact ? " (exact)" : "");
 
     /* walk backwards to avoid O(n^2)
      * XXX case 9819: could use executable_area_overlap_bounds() to avoid linear walk
@@ -9488,6 +9694,19 @@ vm_area_unlink_fragments(dcontext_t *dcontext, app_pc start, app_pc end,
     for (i = data->areas.length - 1; i >= 0; i--) {
         /* look for overlap */
         if (start < data->areas.buf[i].end && end > data->areas.buf[i].start) {
+            if (exact &&
+                (data->areas.buf[i].start < start || data->areas.buf[i].end > end)) {
+                /* Unlink only the fragments with code from the region.  (All of the
+                 * fragments of an area inside the region have code from it.)
+                 */
+                int area_num = vm_area_unlink_fragments_in_region(
+                    dcontext, data, &data->areas.buf[i], start, end, &unlinked);
+                LOG(thread_log, LOG_FRAGMENT | LOG_VMAREAS, 2,
+                    "\tunlinked %d frags of region " PFX ".." PFX "\n", area_num,
+                    data->areas.buf[i].start, data->areas.buf[i].end);
+                num += area_num;
+                continue;
+            }
             LOG(thread_log, LOG_FRAGMENT | LOG_VMAREAS, 2,
                 "\tmarking region " PFX ".." PFX
                 " for deletion & unlinking all its frags\n",
@@ -9625,6 +9844,12 @@ vm_area_unlink_fragments(dcontext_t *dcontext, app_pc start, app_pc end,
                 DOLOG(3, LOG_VMAREAS, { print_vm_areas(&data->areas, thread_log); });
             }
         }
+    }
+
+    if (unlinked != NULL) {
+        ASSERT(data == shared_data);
+        add_to_pending_list(dcontext, unlinked, pending_delete_threads,
+                            flushtime_global _IF_DEBUG(start) _IF_DEBUG(end));
     }
 
     if (data == shared_data) {
@@ -9907,6 +10132,25 @@ vm_area_flush_fragments(dcontext_t *dcontext, fragment_t *was_I_flushed)
     ASSERT(data != shared_data);
 
     LOG(THREAD, LOG_FRAGMENT | LOG_VMAREAS, 2, "vm_area_flush_fragments\n");
+    /* First the fragments that were unlinked individually. */
+    for (entry = data->unlinked_frags; entry != NULL; entry = next) {
+        next = entry->next_vmarea;
+        LOG(THREAD, LOG_FRAGMENT | LOG_VMAREAS, 5, "\tremoving F%d(" PFX ")\n", entry->id,
+            entry->tag);
+        if (entry == was_I_flushed) {
+            not_flushed = false;
+            if (was_I_flushed == dcontext->last_fragment)
+                last_exit_deleted(dcontext);
+        }
+        ASSERT(TESTANY(FRAG_WAS_DELETED, entry->flags) && !FRAG_MULTI(entry));
+        ASSERT(FRAG_ALSO_DEL_OK(entry) == NULL);
+        fragment_delete(dcontext, entry,
+                        FRAGDEL_NO_OUTPUT | FRAGDEL_NO_UNLINK | FRAGDEL_NO_HTABLE |
+                            FRAGDEL_NO_VMAREA);
+        STATS_INC(num_fragments_deleted_consistency);
+        num++;
+    }
+    data->unlinked_frags = NULL;
     /* walk backwards to avoid O(n^2) */
     for (i = v->length - 1; i >= 0; i--) {
         LOG(THREAD, LOG_FRAGMENT | LOG_VMAREAS, 2,

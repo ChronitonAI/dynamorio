@@ -1161,6 +1161,13 @@ flush_fragments_from_region(dcontext_t *dcontext, app_pc base, size_t size,
                             void (*flush_completion_callback)(void *user_data),
                             void *user_data);
 
+/* Flushes, without changes to the executable areas and without a synchall, only the
+ * fragments that may contain code from [base, base + size) if tag is NULL, or only
+ * the fragments whose tag is tag.
+ */
+void
+flush_fragments_exact(dcontext_t *dcontext, app_pc base, size_t size, app_pc tag);
+
 void
 flush_fragments_custom_list(dcontext_t *dcontext, fragment_t *list,
                             bool own_initexit_lock, bool exec_invalid);

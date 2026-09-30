@@ -699,10 +699,20 @@ int
 unlink_fragments_for_deletion(dcontext_t *dcontext, fragment_t *list,
                               int pending_delete_threads);
 
-/* returns the number of fragments unlinked */
+/* Unlinks for deletion the fragments in the vm areas overlapping [start, end): if
+ * !exact, all of them, else only those that may contain code from [start, end).
+ * Returns the number of fragments unlinked.
+ */
 int
 vm_area_unlink_fragments(dcontext_t *dcontext, app_pc start, app_pc end,
-                         int pending_delete_threads _IF_DGCDIAG(app_pc written_pc));
+                         int pending_delete_threads,
+                         bool exact _IF_DGCDIAG(app_pc written_pc));
+
+/* Unlinks the private fragment f of dcontext's thread for deletion by that thread at
+ * its next flush queue check.  Only for use during a flush's synch with that thread.
+ */
+void
+vm_area_unlink_private_fragment(dcontext_t *dcontext, fragment_t *f);
 
 /* removes incoming links for all private fragments in the dcontext
  * thread that contain 'pc'
@@ -710,7 +720,8 @@ vm_area_unlink_fragments(dcontext_t *dcontext, app_pc start, app_pc end,
 void
 vm_area_unlink_incoming(dcontext_t *dcontext, app_pc pc);
 
-/* Flushes thread-private pending-deletion fragments.
+/* Flushes thread-private pending-deletion fragments: those of the vm areas marked for
+ * deletion and those unlinked individually.
  * Returns false iff was_I_flushed ends up being deleted.
  */
 bool
