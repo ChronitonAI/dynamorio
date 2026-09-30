@@ -350,7 +350,8 @@ Further non-compatibility-affecting changes include:
    #DR_FLUSH_EXACT flag limits a flush to the fragments that contain code from the
    region rather than all fragments built from the areas of code it overlaps.
  - Added drbbdup_set_enabled() to have drbbdup leave the basic blocks built from then on
-   alone, for clients that need no duplication for a while.
+   alone, for clients that need no duplication for a while, and
+   drbbdup_set_enabled_func() to have a client decide that for each block.
  - Added drreg_set_enabled() to have drreg leave the basic blocks built from then on
    alone, for clients that need no scratch registers for a while.
  - Added dr_register_bb_filter_event(), with which a client decides for each new
