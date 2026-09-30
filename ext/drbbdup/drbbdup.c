@@ -154,6 +154,11 @@ static int drbbdup_init_count = 0;     /* Instance count of drbbdup. */
  * that all of its phases agree.
  */
 static volatile bool enabled = true;
+/* Decides for each block whether drbbdup processes it, if set, in addition to
+ * "enabled" (drbbdup_set_enabled_func()).
+ */
+static bool (*volatile enabled_func)(void *drcontext, void *tag, bool for_trace,
+                                     bool translating);
 static hashtable_t global_manager_table; /* Maps bbs with book-keeping data. */
 static drbbdup_options_t opts;
 static void *rw_lock = NULL;
@@ -604,8 +609,10 @@ drbbdup_duplicate_phase(void *drcontext, void *tag, instrlist_t *bb, bool for_tr
     dr_emit_flags_t emit_flags = DR_EMIT_DEFAULT;
     drbbdup_per_thread *pt =
         (drbbdup_per_thread *)drmgr_get_tls_field(drcontext, tls_idx);
+    bool (*func)(void *, void *, bool, bool) = enabled_func;
 
-    pt->bb_disabled = !enabled;
+    pt->bb_disabled =
+        !enabled || (func != NULL && !(*func)(drcontext, tag, for_trace, translating));
     if (pt->bb_disabled)
         return emit_flags;
 
@@ -2071,6 +2078,16 @@ drbbdup_set_enabled(bool enable)
 }
 
 drbbdup_status_t
+drbbdup_set_enabled_func(bool (*func)(void *drcontext, void *tag, bool for_trace,
+                                      bool translating))
+{
+    if (drbbdup_init_count == 0)
+        return DRBBDUP_ERROR_NOT_INITIALIZED;
+    enabled_func = func;
+    return DRBBDUP_SUCCESS;
+}
+
+drbbdup_status_t
 drbbdup_get_stats(DR_PARAM_OUT drbbdup_stats_t *stats_in)
 {
     if (!opts.is_stat_enabled)
@@ -2493,6 +2510,7 @@ drbbdup_exit(void)
         /* Reset for re-attach. */
         new_case_cache_pc = NULL;
         enabled = true;
+        enabled_func = NULL;
 
     } else {
         /* Cannot have more than one initialisation of drbbdup. */

@@ -304,7 +304,8 @@ Further non-compatibility-affecting changes include:
    and -exit_after_instrs flags; the old granularity can be reproduced by setting
    "-main_buf_records 4K".
  - Added drbbdup_set_enabled() to have drbbdup leave the basic blocks built from then on
-   alone, for clients that need no duplication for a while.
+   alone, for clients that need no duplication for a while, and
+   drbbdup_set_enabled_func() to have a client decide that for each block.
 
 **************************************************
 <hr>
