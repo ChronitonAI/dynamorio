@@ -1,0 +1,29 @@
+run: 55
+flushed the tag: A
+run: 55
+the block flushed itself: E
+run: 55
+flushed the region exactly: C2
+run: 55
+flushed the region exactly: C1
+run: 55
+flushed the region exactly: D
+run: 55
+flushed the region exactly: X
+run: 55
+before the flush: 9
+flushed the region exactly: W
+after the flush: 90
+run: 136
+delayed flush 1: B
+run: 136
+flushed the region: A B C1 C2 D W E X
+run: 136
+flushed the tag of a block another thread runs
+flushed a block another thread runs exactly
+loop: 6
+traces built: L
+flushed the tag: L
+loop: 6
+traces built: L
+all done

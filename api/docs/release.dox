@@ -306,6 +306,10 @@ Further non-compatibility-affecting changes include:
  - Added dr_app_memory_changed(), which tells DynamoRIO that application memory
    changed without it observing the change (e.g., written by another process),
    along with the memory's new protection.
+ - Added dr_unlink_flush_fragment(), which flushes only the fragments of one tag,
+   and dr_unlink_flush_region_ex() and dr_delay_flush_region_ex(), whose
+   #DR_FLUSH_EXACT flag limits a flush to the fragments that contain code from the
+   region rather than all fragments built from the areas of code it overlaps.
 
 **************************************************
 <hr>

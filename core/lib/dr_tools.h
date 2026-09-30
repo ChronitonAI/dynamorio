@@ -2552,6 +2552,63 @@ DR_API
 bool
 dr_unlink_flush_region(app_pc start, size_t size);
 
+/**
+ * Flags for dr_unlink_flush_region_ex() and dr_delay_flush_region_ex().
+ */
+typedef enum {
+    /**
+     * Flush only the fragments that contain code from the region.  Without this flag,
+     * DR flushes every fragment built from code in the (often module-sized) areas of
+     * code it tracks that overlap the region, not just those containing code from the
+     * region.  To find the fragments, DR decodes the application code preceding the
+     * region, which must still be the code the fragments were built from, while the
+     * code inside the region may have changed (e.g., another process wrote to it).
+     * The region must include all of the code that changed.  DR still flushes more
+     * fragments than those containing code from the region when it cannot tell which
+     * fragments do, such as when it elides direct branches (see -max_elide_jmp and
+     * -max_elide_call) or on Windows.  This flag does not change the method of
+     * flushing, and a delayed flush with this flag is always an unlink flush (see
+     * dr_unlink_flush_region()).
+     */
+    DR_FLUSH_EXACT = 0x01,
+} dr_flush_flags_t;
+
+DR_API
+/**
+ * Equivalent to dr_unlink_flush_region(), with the flags \p flags (a combination of
+ * #dr_flush_flags_t values) controlling which fragments are flushed.  In
+ * particular, with #DR_FLUSH_EXACT, only the fragments that contain code from the
+ * region [\p start, \p start + \p size) are flushed.
+ *
+ * \note The restrictions of dr_unlink_flush_region() apply.
+ */
+bool
+dr_unlink_flush_region_ex(app_pc start, size_t size, dr_flush_flags_t flags);
+
+DR_API
+/**
+ * Flushes the fragments whose tag is \p tag: the basic block and the trace that start
+ * at \p tag, both thread-shared ones and those private to any thread.  Fragments that
+ * merely contain the code at \p tag are not flushed, and neither is any other
+ * fragment: in particular, neither are the fragments built from nearby code, which
+ * a region flush (see dr_unlink_flush_region()) also flushes.  Like
+ * dr_unlink_flush_region(), this is an unlink flush: control will not enter a
+ * flushed fragment after this returns, but a thread already inside one (including
+ * the current thread, if this is called from a clean call in it that returns to the
+ * cache) finishes executing it.  The next execution of \p tag builds a new fragment,
+ * calling the basic block event again.
+ *
+ * \p drcontext must be the current thread's.  The restrictions of
+ * dr_unlink_flush_region() apply.  From a clean call, the caller can return to the
+ * cache or continue elsewhere with dr_redirect_execution(), e.g., at \p tag, to run
+ * the new fragment.
+ *
+ * \return false if the call is not allowed from where it was made, else true (whether
+ * or not fragments with the tag existed).
+ */
+bool
+dr_unlink_flush_fragment(void *drcontext, void *tag);
+
 /* XXX - can we better bound when the flush will happen?  Maybe unlink shared syscalls
  * or similar or check the queue in more locations?  Should always hit the flush before
  * executing new code in the cache, and I think we'll always hit it before a nudge is
@@ -2578,6 +2635,18 @@ DR_API
 bool
 dr_delay_flush_region(app_pc start, size_t size, uint flush_id,
                       void (*flush_completion_callback)(int flush_id));
+
+DR_API
+/**
+ * Equivalent to dr_delay_flush_region(), with the flags \p flags (a combination of
+ * #dr_flush_flags_t values) controlling which fragments are flushed.  With
+ * #DR_FLUSH_EXACT, the flush is an unlink flush (see dr_unlink_flush_region()) and
+ * \p flush_completion_callback, if non-NULL, is called once control can no longer
+ * enter a flushed fragment.
+ */
+bool
+dr_delay_flush_region_ex(app_pc start, size_t size, dr_flush_flags_t flags, uint flush_id,
+                         void (*flush_completion_callback)(int flush_id));
 
 DR_API
 /** Returns whether or not there is a fragment in code cache with tag \p tag. */
