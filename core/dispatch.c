@@ -176,6 +176,12 @@ d_r_dispatch(dcontext_t *dcontext)
             dcontext->next_tag == BACK_TO_NATIVE_AFTER_SYSCALL || dcontext->go_native) {
             handle_special_tag(dcontext);
         }
+        /* Apply a fragment variant selection (see dr_select_thread_fragment_variant())
+         * before we look for the fragment to execute.  The cache exit processing
+         * in dispatch_enter_dynamorio() used the variant that was executing.
+         */
+        if (DYNAMO_OPTION(num_fragment_variants) > 1)
+            fragment_switch_to_selected_variant(dcontext);
         /* Neither hotp_only nor thin_client should have any fragment
          * fcache related work to do.
          */

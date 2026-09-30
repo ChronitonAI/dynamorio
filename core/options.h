@@ -182,6 +182,9 @@ set_dynamo_options(options_t *options, const char *optstr);
 /* are any shared fragments ibl targets? */
 #    define SHARED_IB_TARGETS() (DYNAMO_OPTION(shared_traces) || SHARED_BB_IB_TARGETS())
 
+/* upper bound for -num_fragment_variants */
+#    define MAX_FRAGMENT_VARIANTS 64
+
 /* are any IBT tables (potentially) shared? */
 #    define SHARED_IBT_TABLES_ENABLED() \
         (DYNAMO_OPTION(shared_bb_ibt_tables) || DYNAMO_OPTION(shared_trace_ibt_tables))

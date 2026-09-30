@@ -1893,6 +1893,7 @@ create_callback_dcontext(dcontext_t *old_dcontext)
     new_dcontext->monitor_field = old_dcontext->monitor_field;
     new_dcontext->fcache_field = old_dcontext->fcache_field;
     new_dcontext->fragment_field = old_dcontext->fragment_field;
+    new_dcontext->fragment_ibt_field = old_dcontext->fragment_ibt_field;
     new_dcontext->heap_field = old_dcontext->heap_field;
     new_dcontext->vm_areas_field = old_dcontext->vm_areas_field;
     new_dcontext->os_field = old_dcontext->os_field;

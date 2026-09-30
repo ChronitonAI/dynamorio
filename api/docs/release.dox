@@ -303,6 +303,14 @@ Further non-compatibility-affecting changes include:
    by 8x. This also decreased the granularity of checking for the -trace_for_instrs
    and -exit_after_instrs flags; the old granularity can be reproduced by setting
    "-main_buf_records 4K".
+ - Added fragment variants: with the new runtime option -num_fragment_variants,
+   DR keeps a separate set of code cache fragments for each variant, and a client
+   can instrument each one differently and switch threads between them without
+   flushing, using the new APIs dr_get_num_fragment_variants(),
+   dr_select_thread_fragment_variant(), dr_get_thread_fragment_variant(), and
+   dr_get_fragment_variant(), and the new \p variant field of
+   #dr_fault_fragment_info_t.  Traces are disabled when more than one variant is
+   requested.  More than one variant is currently only supported on x86 Linux.
 
 **************************************************
 <hr>

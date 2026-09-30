@@ -800,10 +800,13 @@ emit_fragment_common(dcontext_t *dcontext, app_pc tag, instrlist_t *ilist, uint 
             fragment_add(dcontext, f);
 
         DOCHECK(1, {
-            if (TESTANY(FRAG_SHARED, flags))
-                ASSERT(fragment_lookup_future(dcontext, tag) == NULL);
-            else
-                ASSERT(fragment_lookup_private_future(dcontext, tag) == NULL);
+            if (TESTANY(FRAG_SHARED, flags)) {
+                ASSERT(fragment_lookup_future(dcontext, tag, FRAGMENT_VARIANT(f)) ==
+                       NULL);
+            } else {
+                ASSERT(fragment_lookup_private_future(dcontext, tag,
+                                                      FRAGMENT_VARIANT(f)) == NULL);
+            }
         });
     }
 

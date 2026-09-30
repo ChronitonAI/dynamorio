@@ -1,0 +1,14 @@
+3 fragment variants
+which_variant blocks built after 90 switches: 1 1 1
+lazy switch: variant 1 after the system call
+select in the pre-system call event: variant 2 after the system call
+select in the post-system call event: variant 1 after the system call
+fault in variant 0: pc ok, rbx ok
+fault in variant 1: pc ok, rbx ok
+fault in variant 2: pc ok, rbx ok
+which_variant blocks deleted before a flush: 0 0 0
+which_variant blocks deleted by the flush: 1 1 1
+which_variant blocks built after a flush: 2 2 2
+blocks executed outside their variant: 0
+0 errors
+client: 0 build mismatches, 0 execution mismatches, 0 event mismatches

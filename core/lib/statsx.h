@@ -393,6 +393,7 @@ STATS_DEF("App writes emulated un-successfully", num_emulated_write_failures)
 STATS_DEF("Fragments generated, bb and trace", num_fragments)
 RSTATS_DEF("Basic block fragments generated", num_bbs)
 RSTATS_DEF("Trace fragments generated", num_traces)
+STATS_DEF("Fragment variant switches", num_fragment_variant_switches)
 #ifdef X64
 STATS_DEF("32-bit basic block fragments generated", num_32bit_bbs)
 STATS_DEF("32-bit trace fragments generated", num_32bit_traces)

@@ -1003,6 +1003,14 @@ OPTION_DEFAULT_INTERNAL(bool, remove_shared_trace_heads, true,
 
 OPTION_DEFAULT(bool, remove_trace_components, false, "remove bb components of new traces")
 
+/* Each variant has its own fragments and lookup tables; a thread only executes
+ * the fragments of its current variant.  Values above 1 disable traces and are
+ * incompatible with -coarse_units, shared ibt tables, and inlined ibl.
+ */
+OPTION_DEFAULT(uint, num_fragment_variants, 1,
+               "number of fragment variants (separately built and instrumented copies "
+               "of the code) that a client can switch threads between")
+
 OPTION_DEFAULT(bool, shared_deletion, true, "enable shared fragment deletion")
 OPTION_DEFAULT(bool, syscalls_synch_flush, true,
                "syscalls are flush synch points (currently for shared_deletion only)")

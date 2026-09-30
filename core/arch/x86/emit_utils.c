@@ -1949,14 +1949,14 @@ append_ibl_head(dcontext_t *dcontext, instrlist_t *ilist, ibl_code_t *ibl_code,
 
     if (only_spill_state_in_tls) {
         /* grab the per_thread_t into XDI - can't use SAVE_TO_DC after this */
-        /* >>> mov  %xdi, fragment_field(%xdi) */
+        /* >>> mov  %xdi, fragment_ibt_field(%xdi) */
         /*   TODO:  make this an 8bit offset, currently it is a 32bit one
              8b bf 94 00 00 00    mov    0x94(%xdi) -> %xdi
         */
         APP(ilist,
             XINST_CREATE_load(
                 dcontext, opnd_create_reg(SCRATCH_REG5),
-                OPND_DC_FIELD(absolute, dcontext, OPSZ_PTR, FRAGMENT_FIELD_OFFSET)));
+                OPND_DC_FIELD(absolute, dcontext, OPSZ_PTR, FRAGMENT_IBT_FIELD_OFFSET)));
         /* TODO: should have a flag that SAVE_TO_DC can ASSERT(valid_DC_in_reg) */
     }
     /* hash function = (tag & mask) */
@@ -2591,7 +2591,7 @@ emit_indirect_branch_lookup(dcontext_t *dcontext, generated_code_t *code, byte *
                 APP(&ilist,
                     XINST_CREATE_load(dcontext, opnd_create_reg(SCRATCH_REG5),
                                       OPND_DC_FIELD(absolute, dcontext, OPSZ_PTR,
-                                                    FRAGMENT_FIELD_OFFSET)));
+                                                    FRAGMENT_IBT_FIELD_OFFSET)));
                 /* We could load directly into XCX but since hash stats are on,
                  * we assume that this isn't a performance-sensitive run and
                  * opt for code simplicity by rematerializing XDI.

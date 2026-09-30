@@ -146,6 +146,12 @@
 #    define FRAG_STARTS_RSEQ_REGION 0x4000000
 #endif
 
+/* The fragment belongs to a fragment variant other than variant 0 (see
+ * -num_fragment_variants).  The variant is stored in a word right before the
+ * fragment_t/trace_t struct in its heap allocation (see FRAGMENT_VARIANT()).
+ */
+#define FRAG_HAS_VARIANT 0x8000000
+
 /* Indicates coarse-grain cache management, i.e., batch units with
  * no individual fragment_t.
  */
@@ -537,7 +543,30 @@ typedef struct _per_thread_t {
      * not used while not flushing.
      */
     bool at_syscall_at_flush;
+    /* Fragment variants (-num_fragment_variants): a thread has one per_thread_t
+     * per variant, allocated contiguously.  dcontext->fragment_field points at
+     * the first one, which holds variant 0's tables along with all of the other
+     * per-thread state.  The one at index v > 0 is only a container for variant
+     * v's tables (the trace_ibt, bb_ibt, bb, trace, and future fields), just
+     * like shared_pt is a container for the shared tables.
+     * The fields below are only used in the first per_thread_t.
+     */
+    /* The variant whose fragments and tables this thread uses in the code cache. */
+    uint variant;
+    /* The variant selected by the client, which d_r_dispatch() switches to
+     * when it next looks for a fragment to execute.
+     */
+    uint next_variant;
+    /* The variant of the fragment for which a basic block is being built or
+     * state is being translated: variant, except while translating.
+     */
+    uint event_variant;
 } per_thread_t;
+
+/* Returns the table container for variant v of the thread whose (first)
+ * per_thread_t is pt.  NULL if pt is NULL.
+ */
+#define PT_VARIANT(pt, v) ((pt) == NULL ? NULL : (pt) + (v))
 
 #define FCACHE_ENTRY_PC(f) (f->start_pc + f->prefix_size)
 #define FCACHE_PREFIX_ENTRY_PC(f) \
@@ -553,6 +582,12 @@ typedef struct _per_thread_t {
           : (TESTANY(FRAG_SHARED, (flags)) ? sizeof(fragment_t)                         \
                                            : sizeof(private_fragment_t))) +             \
      (TESTANY(FRAG_HAS_TRANSLATION_INFO, flags) ? sizeof(translation_info_t *) : 0))
+
+/* Size of the field holding the variant of a FRAG_HAS_VARIANT fragment, which
+ * precedes the fragment_t in its heap allocation.
+ */
+#define FRAGMENT_VARIANT_FIELD_SIZE(flags) \
+    (TESTANY(FRAG_HAS_VARIANT, (flags)) ? sizeof(ptr_uint_t) : 0)
 
 #define FRAGMENT_EXIT_STUBS(f)                                                         \
     (TESTANY(FRAG_FAKE, (f)->flags)                                                    \
@@ -583,6 +618,22 @@ typedef struct _per_thread_t {
 
 #define FRAGMENT_TRANSLATION_INFO(f) \
     (HAS_STORED_TRANSLATION_INFO(f) ? (*(FRAGMENT_TRANSLATION_INFO_ADDR(f))) : NULL)
+
+/* The fragment variant is stored before the struct only for FRAG_HAS_VARIANT
+ * fragments: all others are in variant 0.  Keeping it out of the rest of the
+ * layout leaves FRAGMENT_EXIT_STUBS() and the like unchanged.
+ */
+#define FRAGMENT_VARIANT_ADDR(f) \
+    (ASSERT(TESTANY(FRAG_HAS_VARIANT, (f)->flags)), ((ptr_uint_t *)(f)) - 1)
+
+/* The variant of fragment f.  With a single variant the flag is never set; we
+ * still check the option so that the default configuration never reads the
+ * variant word, but only after the flag, which callers usually have at hand.
+ */
+#define FRAGMENT_VARIANT(f)                                                              \
+    ((TESTANY(FRAG_HAS_VARIANT, (f)->flags) && DYNAMO_OPTION(num_fragment_variants) > 1) \
+         ? (uint)(*FRAGMENT_VARIANT_ADDR(f))                                             \
+         : 0)
 
 static inline const char *
 fragment_type_name(fragment_t *f)
@@ -714,8 +765,14 @@ fragment_remove(dcontext_t *dcontext, fragment_t *f);
 void
 fragment_replace(dcontext_t *dcontext, fragment_t *f, fragment_t *new_f);
 
+/* Lookups by tag use the tables of dcontext's current fragment variant (variant
+ * 0 for GLOBAL_DCONTEXT), unless they take an explicit variant.
+ */
 fragment_t *
 fragment_lookup(dcontext_t *dcontext, app_pc tag);
+
+fragment_t *
+fragment_lookup_variant(dcontext_t *dcontext, app_pc tag, uint variant);
 
 fragment_t *
 fragment_lookup_bb(dcontext_t *dcontext, app_pc tag);
@@ -727,7 +784,7 @@ fragment_t *
 fragment_lookup_trace(dcontext_t *dcontext, app_pc tag);
 
 fragment_t *
-fragment_lookup_same_sharing(dcontext_t *dcontext, app_pc tag, uint flags);
+fragment_lookup_same_sharing(dcontext_t *dcontext, app_pc tag, uint flags, uint variant);
 
 fragment_t *
 fragment_pclookup(dcontext_t *dcontext, cache_pc pc, fragment_t *wrapper);
@@ -757,18 +814,38 @@ fragment_update_ibl_tables(dcontext_t *dcontext);
 void
 fragment_add_ibl_target(dcontext_t *dcontext, app_pc tag, ibl_branch_type_t branch_type);
 
-/* future fragments */
+/* future fragments: a future is in the tables of one fragment variant */
 future_fragment_t *
-fragment_create_and_add_future(dcontext_t *dcontext, app_pc tag, uint flags);
+fragment_create_and_add_future(dcontext_t *dcontext, app_pc tag, uint flags,
+                               uint variant);
 
 void
-fragment_delete_future(dcontext_t *dcontext, future_fragment_t *fut);
+fragment_delete_future(dcontext_t *dcontext, future_fragment_t *fut, uint variant);
 
 future_fragment_t *
-fragment_lookup_future(dcontext_t *dcontext, app_pc tag);
+fragment_lookup_future(dcontext_t *dcontext, app_pc tag, uint variant);
 
 future_fragment_t *
-fragment_lookup_private_future(dcontext_t *dcontext, app_pc tag);
+fragment_lookup_private_future(dcontext_t *dcontext, app_pc tag, uint variant);
+
+/* fragment variants */
+uint
+fragment_num_variants(void);
+
+uint
+fragment_current_variant(dcontext_t *dcontext);
+
+bool
+fragment_select_variant(dcontext_t *dcontext, uint variant);
+
+void
+fragment_switch_to_selected_variant(dcontext_t *dcontext);
+
+uint
+fragment_event_variant(dcontext_t *dcontext);
+
+uint
+fragment_set_event_variant(dcontext_t *dcontext, uint variant);
 
 #ifdef RETURN_AFTER_CALL
 app_pc
@@ -935,7 +1012,7 @@ fragment_lookup_fine_and_coarse(dcontext_t *dcontext, app_pc tag, fragment_t *wr
 fragment_t *
 fragment_lookup_fine_and_coarse_sharing(dcontext_t *dcontext, app_pc tag,
                                         fragment_t *wrapper, linkstub_t *last_exit,
-                                        uint share_flags);
+                                        uint share_flags, uint variant);
 
 coarse_info_t *
 get_fragment_coarse_info(fragment_t *f);
@@ -1229,7 +1306,7 @@ append_ib_trace_last_ibl_exit_stat(dcontext_t *dcontext, instrlist_t *trace,
 static INLINE_ONCE hashtable_statistics_t *
 get_ibl_per_type_statistics(dcontext_t *dcontext, ibl_branch_type_t branch_type)
 {
-    per_thread_t *pt = (per_thread_t *)dcontext->fragment_field;
+    per_thread_t *pt = (per_thread_t *)dcontext->fragment_ibt_field;
     return &pt->trace_ibt[branch_type].unprot_stats->trace_ibl_stats[branch_type];
 }
 #endif /* HASHTABLE_STATISTICS */

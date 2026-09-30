@@ -1180,7 +1180,7 @@ patch_emitted_code(dcontext_t *dcontext, patch_list_t *patch, byte *start_pc)
 {
     uint i;
     /* XXX: can get this as a patch list entry through indirection */
-    per_thread_t *pt = (per_thread_t *)dcontext->fragment_field;
+    per_thread_t *pt = (per_thread_t *)dcontext->fragment_ibt_field;
     ASSERT(dcontext != GLOBAL_DCONTEXT && dcontext != NULL);
 
     LOG(THREAD, LOG_EMIT, 2, "patch_emitted_code start_pc=" PFX " pt=" PFX "\n",
@@ -3029,7 +3029,7 @@ append_increment_counter(dcontext_t *dcontext, instrlist_t *ilist, ibl_code_t *i
         APP(ilist,
             XINST_CREATE_load(
                 dcontext, opnd_create_reg(SCRATCH_REG5 /*xdi/r5*/),
-                OPND_DC_FIELD(absolute, dcontext, OPSZ_PTR, FRAGMENT_FIELD_OFFSET)));
+                OPND_DC_FIELD(absolute, dcontext, OPSZ_PTR, FRAGMENT_IBT_FIELD_OFFSET)));
 
         /* XDI now has per_thread_t structure */
         /* an extra step here: find the unprot_stats field in the fragment_table_t

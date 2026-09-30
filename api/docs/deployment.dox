@@ -862,6 +862,17 @@ are specified via \c drconfig, \c drrun, or dr_register_process().  See
      -thread_private as today it turns on -shared_traces
    \endif
 
+ - \b -num_fragment_variants \e \<number\>: \anchor op_num_fragment_variants
+   Requests \e number (at most 64) separate sets of code cache fragments,
+   called fragment variants, between which a client can switch each thread
+   with dr_select_thread_fragment_variant(): see dr_get_num_fragment_variants()
+   for the details.  The default is 1, which disables the feature.  With more
+   than one variant, traces are disabled (as with -disable_traces), and
+   -coarse_units, -shared_bb_ibt_tables, -shared_trace_ibt_tables,
+   -inline_bb_ibl, and -inline_trace_ibl are not supported.  Each thread keeps
+   separate lookup tables for each variant.  More than one variant is currently
+   only supported on x86 Linux.
+
  - \b -enable_full_api: \anchor op_enable
    DynamoRIO's default internal options balance performance with API
    usability.  A few API functions, such as dr_unlink_flush_region(),
