@@ -342,6 +342,10 @@ typedef struct _client_flush_req_t {
     size_t size;
     uint flush_id; /* client supplied identifier for this flush */
     void (*flush_callback)(int);
+    /* Whether to flush only the fragments with code from the region: see
+     * flush_fragments_exact().
+     */
+    bool exact;
     struct _client_flush_req_t *next;
 } client_flush_req_t;
 

@@ -2935,6 +2935,12 @@ if (X86 OR AARCH64 OR RISCV64) # XXX i#1551: port asm to ARM
     tobuild_ci(client.flush client-interface/flush.c "" "" "")
   endif ()
 endif (X86 OR AARCH64 OR RISCV64)
+if (LINUX AND X86 AND X64)
+  tobuild_ci(client.flush_exact client-interface/flush_exact.c "" "" "")
+  link_with_pthread(client.flush_exact)
+  torunonly_ci(client.flush_exact-thread_private client.flush_exact
+    client.flush_exact.dll client-interface/flush_exact.c "" "-thread_private" "")
+endif ()
 if (X86 OR AARCH64) # XXX i#1551: port asm to ARM
   tobuild_ci(client.strace client-interface/strace.c "" "" "")
   use_DynamoRIO_extension(client.strace.dll drmgr)

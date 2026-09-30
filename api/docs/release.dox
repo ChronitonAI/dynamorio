@@ -340,6 +340,10 @@ Further non-compatibility-affecting changes include:
  - On Linux, -no_follow_systemwide now keeps a child's configuration from turning on
    following it across execve when -no_follow_children is set, so that the two
    options together leave execve untouched.
+ - Added dr_unlink_flush_fragment(), which flushes only the fragments of one tag,
+   and dr_unlink_flush_region_ex() and dr_delay_flush_region_ex(), whose
+   #DR_FLUSH_EXACT flag limits a flush to the fragments that contain code from the
+   region rather than all fragments built from the areas of code it overlaps.
 
 **************************************************
 <hr>
