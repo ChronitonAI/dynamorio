@@ -126,9 +126,16 @@ typedef struct _per_thread_t {
     /* bb-local values */
     drreg_bb_properties_t bb_props;
     bool bb_has_internal_flow;
+    bool bb_disabled; /* drreg leaves the bb alone (see "enabled") */
 } per_thread_t;
 
 static drreg_options_t ops;
+
+/* Whether drreg processes the blocks built from now on (drreg_set_enabled()). A block
+ * takes the value in drreg's analysis event (bb_disabled in the per-thread data), so that
+ * all of drreg's events for it agree.
+ */
+static volatile bool enabled = true;
 
 static int tls_idx = -1;
 static uint tls_slot_offs;
@@ -140,6 +147,16 @@ static uint stats_max_slot;
 
 static per_thread_t *
 get_tls_data(void *drcontext);
+
+/* Whether drreg leaves the block being instrumented alone (drreg_set_enabled()): its
+ * analysis was skipped, so it has no liveness information or reservations.  (Outside
+ * the insertion phase drreg analyses from the instruction at hand.)
+ */
+static bool
+bb_disabled(void *drcontext, per_thread_t *pt)
+{
+    return pt->bb_disabled && drmgr_current_bb_phase(drcontext) == DRMGR_PHASE_INSERTION;
+}
 
 static drreg_status_t
 drreg_restore_reg_now(void *drcontext, instrlist_t *ilist, instr_t *inst,
@@ -353,6 +370,11 @@ drreg_event_bb_analysis(void *drcontext, void *tag, instrlist_t *bb, bool for_tr
     uint index = 0;
     reg_id_t reg;
 
+    /* Reset in drreg_event_bb_instru2instru_late(). */
+    pt->bb_disabled = !enabled;
+    if (pt->bb_disabled)
+        return DR_EMIT_DEFAULT;
+
     for (reg = DR_REG_START_GPR; reg <= DR_REG_STOP_GPR; reg++)
         pt->reg[GPR_IDX(reg)].app_uses = 0;
     /* pt->bb_props is set to 0 at thread init and after each bb */
@@ -446,6 +468,8 @@ drreg_event_bb_insert_early(void *drcontext, void *tag, instrlist_t *bb, instr_t
                             bool for_trace, bool translating, void *user_data)
 {
     per_thread_t *pt = get_tls_data(drcontext);
+    if (pt->bb_disabled)
+        return DR_EMIT_DEFAULT;
     pt->cur_instr = inst;
     pt->live_idx--; /* counts backward */
     return DR_EMIT_DEFAULT;
@@ -458,7 +482,9 @@ drreg_event_bb_instru2instru_late(void *drcontext, void *tag, instrlist_t *bb,
     /* We preserve bb_props until late in instru2instru as there may be drreg usages
      * in other passes that need to look at it.
      */
-    get_tls_data(drcontext)->bb_props = 0;
+    per_thread_t *pt = get_tls_data(drcontext);
+    pt->bb_props = 0;
+    pt->bb_disabled = false;
     return DR_EMIT_DEFAULT;
 }
 
@@ -733,6 +759,9 @@ drreg_event_bb_insert_late(void *drcontext, void *tag, instrlist_t *bb, instr_t 
     drreg_status_t res;
     dr_pred_type_t pred = instrlist_get_auto_predicate(bb);
 
+    if (pt->bb_disabled)
+        return DR_EMIT_DEFAULT;
+
     /* XXX i#2585: drreg should predicate spills and restores as appropriate */
     instrlist_set_auto_predicate(bb, DR_PRED_NONE);
     /* For unreserved regs still spilled, we lazily do the restore here.  We also
@@ -798,6 +827,8 @@ drreg_event_clean_call_insertion(void *drcontext, instrlist_t *ilist, instr_t *w
         }
         return;
     }
+    if (get_tls_data(drcontext)->bb_disabled)
+        return;
     bool restored_for_read[DR_NUM_GPR_REGS];
     drreg_status_t res;
     if (TESTANY(DR_CLEANCALL_READS_APP_CONTEXT, call_flags)) {
@@ -965,6 +996,8 @@ drreg_reserve_reg_internal(void *drcontext, instrlist_t *ilist, instr_t *where,
     bool already_spilled = false;
     if (reg_out == NULL)
         return DRREG_ERROR_INVALID_PARAMETER;
+    if (bb_disabled(drcontext, pt))
+        return DRREG_ERROR_FEATURE_NOT_AVAILABLE;
 
     /* First, try to use a previously unreserved but not yet lazily restored reg.
      * This must be first to avoid accumulating slots beyond the requested max.
@@ -1485,6 +1518,8 @@ drreg_is_register_dead(void *drcontext, reg_id_t reg, instr_t *inst, bool *dead)
     per_thread_t *pt = get_tls_data(drcontext);
     if (dead == NULL)
         return DRREG_ERROR_INVALID_PARAMETER;
+    if (bb_disabled(drcontext, pt))
+        return DRREG_ERROR_FEATURE_NOT_AVAILABLE;
     if (drmgr_current_bb_phase(drcontext) != DRMGR_PHASE_INSERTION) {
         drreg_status_t res = drreg_forward_analysis(drcontext, inst);
         if (res != DRREG_SUCCESS)
@@ -1753,6 +1788,8 @@ drreg_reserve_aflags(void *drcontext, instrlist_t *ilist, instr_t *where)
     dr_pred_type_t pred = instrlist_get_auto_predicate(ilist);
     drreg_status_t res;
     uint aflags;
+    if (bb_disabled(drcontext, pt))
+        return DRREG_ERROR_FEATURE_NOT_AVAILABLE;
     if (drmgr_current_bb_phase(drcontext) != DRMGR_PHASE_INSERTION) {
         res = drreg_forward_analysis(drcontext, where);
         if (res != DRREG_SUCCESS)
@@ -1846,6 +1883,8 @@ drreg_aflags_liveness(void *drcontext, instr_t *inst, DR_PARAM_OUT uint *value)
     per_thread_t *pt = get_tls_data(drcontext);
     if (value == NULL)
         return DRREG_ERROR_INVALID_PARAMETER;
+    if (bb_disabled(drcontext, pt))
+        return DRREG_ERROR_FEATURE_NOT_AVAILABLE;
     if (drmgr_current_bb_phase(drcontext) != DRMGR_PHASE_INSERTION) {
         drreg_status_t res = drreg_forward_analysis(drcontext, inst);
         if (res != DRREG_SUCCESS)
@@ -2510,6 +2549,15 @@ drreg_thread_exit(void *drcontext)
 }
 
 drreg_status_t
+drreg_set_enabled(bool enable)
+{
+    if (drreg_init_count == 0)
+        return DRREG_ERROR;
+    enabled = enable;
+    return DRREG_SUCCESS;
+}
+
+drreg_status_t
 drreg_init(drreg_options_t *ops_in)
 {
     uint prior_slots = ops.num_spill_slots;
@@ -2626,6 +2674,8 @@ drreg_exit(void)
         if (!dr_raw_tls_cfree(tls_slot_offs, ops.num_spill_slots))
             return DRREG_ERROR;
     }
+
+    enabled = true;
 
     /* Support re-attach. */
     if (dr_is_detaching()) {

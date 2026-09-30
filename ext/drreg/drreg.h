@@ -211,6 +211,29 @@ drreg_exit(void);
 
 DR_EXPORT
 /**
+ * Enables (\p enable true, the default after drreg_init()) or disables drreg for the
+ * basic blocks built from now on, for all of its users. drreg does not analyse or
+ * process a block built while it is disabled: no scratch register or arithmetic flags
+ * can be reserved in its insertion phase (drreg_reserve_register(),
+ * drreg_reserve_dead_register() and drreg_reserve_aflags() return
+ * #DRREG_ERROR_FEATURE_NOT_AVAILABLE, as do the liveness queries), and clean calls
+ * inserted into it get no restores from drreg. This lets a client that needs no
+ * scratch registers for a while, and whose other extensions (e.g., drbbdup) need none
+ * either, avoid drreg's cost for every block.
+ *
+ * Blocks built before the call are not affected. As DR rebuilds a block to translate a
+ * fault or signal inside it, a block must never be translated in the other state from
+ * the one it was built in: the client must flush all blocks built in the other state
+ * (e.g., with a synchronous dr_flush_region() of all code) together with the change,
+ * before any of them runs again.
+ *
+ * @return whether successful or an error code on failure.
+ */
+drreg_status_t
+drreg_set_enabled(bool enable);
+
+DR_EXPORT
+/**
  * In debug build, drreg tracks the maximum simultaneous number of spill
  * slots in use.  This can help a user to tune drreg_options_t.num_spill_slots.
  *
