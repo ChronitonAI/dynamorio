@@ -182,6 +182,25 @@ get_where_app_pc(instr_t *where)
 }
 #endif
 
+/* The liveness of the general-purpose registers.  With ops.conservative, every
+ * register counts as live (the application may rely on the value of a dead register
+ * when a fault happens), so we do not compute their liveness: all queries must go
+ * through these routines.
+ */
+static inline bool
+is_reg_dead(per_thread_t *pt, reg_id_t reg, int live_idx)
+{
+    return !ops.conservative &&
+        drvector_get_entry(&pt->reg[GPR_IDX(reg)].live, live_idx) == REG_DEAD;
+}
+
+static inline bool
+is_reg_live(per_thread_t *pt, reg_id_t reg, int live_idx)
+{
+    return ops.conservative ||
+        drvector_get_entry(&pt->reg[GPR_IDX(reg)].live, live_idx) == REG_LIVE;
+}
+
 /***************************************************************************
  * SPILLING AND RESTORING
  */
@@ -352,6 +371,7 @@ drreg_event_bb_analysis(void *drcontext, void *tag, instrlist_t *bb, bool for_tr
     ptr_uint_t aflags_new, aflags_cur = 0;
     uint index = 0;
     reg_id_t reg;
+    bool gpr_liveness = !ops.conservative;
 
     for (reg = DR_REG_START_GPR; reg <= DR_REG_STOP_GPR; reg++)
         pt->reg[GPR_IDX(reg)].app_uses = 0;
@@ -377,10 +397,10 @@ drreg_event_bb_analysis(void *drcontext, void *tag, instrlist_t *bb, bool for_tr
                 __FUNCTION__, index, get_where_app_pc(inst));
         }
 
-        /* GPR liveness */
+        /* GPR liveness (none with ops.conservative: see is_reg_live()) */
         LOG(drcontext, DR_LOG_ALL, 3, "%s @%d." PFX ":", __FUNCTION__, index,
             get_where_app_pc(inst));
-        for (reg = DR_REG_START_GPR; reg <= DR_REG_STOP_GPR; reg++) {
+        for (reg = DR_REG_START_GPR; gpr_liveness && reg <= DR_REG_STOP_GPR; reg++) {
             void *value = REG_LIVE;
             /* DRi#1849: COND_SRCS here includes addressing regs in dsts */
             if (instr_reads_from_reg(inst, reg, DR_QUERY_INCLUDE_COND_SRCS))
@@ -653,9 +673,7 @@ drreg_insert_respill_all(void *drcontext, per_thread_t *pt, instrlist_t *bb,
         if (pt->reg[GPR_IDX(reg)].in_use) {
             if ((force_respill || instr_writes_to_reg(inst, reg, DR_QUERY_INCLUDE_ALL)) &&
                 /* Don't bother if reg is dead beyond this write */
-                (ops.conservative || pt->live_idx == 0 ||
-                 drvector_get_entry(&pt->reg[GPR_IDX(reg)].live, pt->live_idx - 1) ==
-                     REG_LIVE ||
+                (pt->live_idx == 0 || is_reg_live(pt, reg, pt->live_idx - 1) ||
                  pt->aflags.xchg == reg)) {
                 uint tmp_slot = MAX_SPILLS;
                 if (pt->aflags.xchg == reg) {
@@ -856,10 +874,13 @@ drreg_forward_analysis(void *drcontext, instr_t *start)
     ptr_uint_t aflags_new, aflags_cur = 0;
     reg_id_t reg;
 
-    /* We just use index 0 of the live vectors */
+    /* We just use index 0 of the live vectors.  With ops.conservative we do not
+     * compute GPR liveness (see is_reg_live()): marking them live skips them below.
+     */
     for (reg = DR_REG_START_GPR; reg <= DR_REG_STOP_GPR; reg++) {
         pt->reg[GPR_IDX(reg)].app_uses = 0;
-        drvector_set_entry(&pt->reg[GPR_IDX(reg)].live, 0, REG_UNKNOWN);
+        drvector_set_entry(&pt->reg[GPR_IDX(reg)].live, 0,
+                           ops.conservative ? REG_LIVE : REG_UNKNOWN);
     }
 
     /* We have to consider meta instrs as well */
@@ -978,7 +999,7 @@ drreg_reserve_reg_internal(void *drcontext, instrlist_t *ilist, instr_t *where,
             if (!pt->reg[idx].native && !pt->reg[idx].in_use &&
                 (reg_allowed == NULL || drvector_get_entry(reg_allowed, idx) != NULL) &&
                 (!only_if_no_spill || pt->reg[idx].ever_spilled ||
-                 drvector_get_entry(&pt->reg[idx].live, pt->live_idx) == REG_DEAD)) {
+                 is_reg_dead(pt, reg, pt->live_idx))) {
                 slot = pt->reg[idx].slot;
                 pt->pending_unreserved--;
                 already_spilled = pt->reg[idx].ever_spilled;
@@ -1009,7 +1030,7 @@ drreg_reserve_reg_internal(void *drcontext, instrlist_t *ilist, instr_t *where,
             /* If we had a hint as to local vs whole-bb we could downgrade being
              * dead right now as a priority
              */
-            if (drvector_get_entry(&pt->reg[idx].live, pt->live_idx) == REG_DEAD)
+            if (is_reg_dead(pt, reg, pt->live_idx))
                 break;
             if (only_if_no_spill)
                 continue;
@@ -1051,8 +1072,7 @@ drreg_reserve_reg_internal(void *drcontext, instrlist_t *ilist, instr_t *where,
     pt->reg[GPR_IDX(reg)].in_use = true;
     if (!already_spilled) {
         /* Even if dead now, we need to own a slot in case reserved past dead point */
-        if (ops.conservative ||
-            drvector_get_entry(&pt->reg[GPR_IDX(reg)].live, pt->live_idx) == REG_LIVE) {
+        if (is_reg_live(pt, reg, pt->live_idx)) {
             LOG(drcontext, DR_LOG_ALL, 3, "%s @%d." PFX ": spilling %s to slot %d\n",
                 __FUNCTION__, pt->live_idx, get_where_app_pc(where),
                 get_register_name(reg), slot);
@@ -1491,7 +1511,7 @@ drreg_is_register_dead(void *drcontext, reg_id_t reg, instr_t *inst, bool *dead)
             return res;
         ASSERT(pt->live_idx == 0, "non-drmgr-insert always uses 0 index");
     }
-    *dead = drvector_get_entry(&pt->reg[GPR_IDX(reg)].live, pt->live_idx) == REG_DEAD;
+    *dead = is_reg_dead(pt, reg, pt->live_idx);
     return DRREG_SUCCESS;
 }
 
@@ -1546,9 +1566,7 @@ drreg_move_aflags_from_reg(void *drcontext, instrlist_t *ilist, instr_t *where,
         "%s @%d." PFX ": restoring xax spilled for aflags in slot %d\n", __FUNCTION__,
         pt->live_idx, get_where_app_pc(where),
         pt->reg[DR_REG_XAX - DR_REG_START_GPR].slot);
-    if (ops.conservative ||
-        drvector_get_entry(&pt->reg[DR_REG_XAX - DR_REG_START_GPR].live, pt->live_idx) ==
-            REG_LIVE) {
+    if (is_reg_live(pt, DR_REG_XAX, pt->live_idx)) {
         restore_reg(drcontext, pt, DR_REG_XAX,
                     pt->reg[DR_REG_XAX - DR_REG_START_GPR].slot, ilist, where, stateful);
     } else if (stateful)
@@ -1598,9 +1616,7 @@ drreg_spill_aflags(void *drcontext, instrlist_t *ilist, instr_t *where, per_thre
         uint xax_slot = find_free_slot(drcontext, pt, ilist, where);
         if (xax_slot == MAX_SPILLS)
             return DRREG_ERROR_OUT_OF_SLOTS;
-        if (ops.conservative ||
-            drvector_get_entry(&pt->reg[DR_REG_XAX - DR_REG_START_GPR].live,
-                               pt->live_idx) == REG_LIVE) {
+        if (is_reg_live(pt, DR_REG_XAX, pt->live_idx)) {
             spill_reg(drcontext, pt, DR_REG_XAX, xax_slot, ilist, where);
             pt->reg[DR_REG_XAX - DR_REG_START_GPR].ever_spilled = true;
         } else {
@@ -1695,9 +1711,7 @@ drreg_restore_aflags(void *drcontext, instrlist_t *ilist, instr_t *where,
             PRE(ilist, where,
                 INSTR_CREATE_xchg(drcontext, opnd_create_reg(DR_REG_XAX),
                                   opnd_create_reg(xax_swap)));
-        } else if (ops.conservative ||
-                   drvector_get_entry(&pt->reg[DR_REG_XAX - DR_REG_START_GPR].live,
-                                      pt->live_idx) == REG_LIVE)
+        } else if (is_reg_live(pt, DR_REG_XAX, pt->live_idx))
             spill_reg(drcontext, pt, DR_REG_XAX, temp_slot, ilist, where);
         ASSERT(pt->aflags.slot != MAX_SPILLS, "Aflags slot not reserved");
         restore_reg(drcontext, pt, DR_REG_XAX, pt->aflags.slot, ilist, where, release);
@@ -1725,9 +1739,7 @@ drreg_restore_aflags(void *drcontext, instrlist_t *ilist, instr_t *where,
             pt->reg[DR_REG_XAX - DR_REG_START_GPR].in_use = false;
         }
     } else {
-        if (ops.conservative ||
-            drvector_get_entry(&pt->reg[DR_REG_XAX - DR_REG_START_GPR].live,
-                               pt->live_idx) == REG_LIVE)
+        if (is_reg_live(pt, DR_REG_XAX, pt->live_idx))
             restore_reg(drcontext, pt, DR_REG_XAX, temp_slot, ilist, where, true);
     }
 #elif defined(AARCHXX)
