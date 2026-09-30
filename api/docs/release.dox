@@ -351,6 +351,8 @@ Further non-compatibility-affecting changes include:
    region rather than all fragments built from the areas of code it overlaps.
  - Added drbbdup_set_enabled() to have drbbdup leave the basic blocks built from then on
    alone, for clients that need no duplication for a while.
+ - Added drreg_set_enabled() to have drreg leave the basic blocks built from then on
+   alone, for clients that need no scratch registers for a while.
 
 **************************************************
 <hr>

@@ -3201,6 +3201,10 @@ if (NOT RISCV64) # TODO i#3544: Port tests to RISC-V 64
   use_DynamoRIO_extension(client.drreg-end-restore.dll drmgr)
   use_DynamoRIO_extension(client.drreg-end-restore.dll drreg)
 
+  tobuild_ci(client.drreg-disable-test client-interface/drreg-disable-test.c "" "" "")
+  use_DynamoRIO_extension(client.drreg-disable-test.dll drmgr)
+  use_DynamoRIO_extension(client.drreg-disable-test.dll drreg)
+
   tobuild_ci(client.drreg-flow client-interface/drreg-flow.c "" "" "")
   use_DynamoRIO_extension(client.drreg-flow.dll drmgr)
   use_DynamoRIO_extension(client.drreg-flow.dll drreg)
