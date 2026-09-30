@@ -144,10 +144,16 @@ typedef struct {
     instr_t *first_nonlabel_instr; /* The first non label instr of the bb copy. */
     instr_t *last_instr;           /* The last instr of the bb copy being considered. */
     byte *tls_seg_base;            /* For access from another thread. */
+    bool bb_disabled; /* drbbdup is disabled for the bb being built (see "enabled"). */
 } drbbdup_per_thread;
 
 static bool is_thread_private = false; /* Denotes whether DR caches are thread-private. */
 static int drbbdup_init_count = 0;     /* Instance count of drbbdup. */
+/* Whether drbbdup processes the blocks built from now on (drbbdup_set_enabled()). A block
+ * takes the value when its app2app phase starts (bb_disabled in the per-thread data), so
+ * that all of its phases agree.
+ */
+static volatile bool enabled = true;
 static hashtable_t global_manager_table; /* Maps bbs with book-keeping data. */
 static drbbdup_options_t opts;
 static void *rw_lock = NULL;
@@ -596,6 +602,12 @@ drbbdup_duplicate_phase(void *drcontext, void *tag, instrlist_t *bb, bool for_tr
                         bool translating)
 {
     dr_emit_flags_t emit_flags = DR_EMIT_DEFAULT;
+    drbbdup_per_thread *pt =
+        (drbbdup_per_thread *)drmgr_get_tls_field(drcontext, tls_idx);
+
+    pt->bb_disabled = !enabled;
+    if (pt->bb_disabled)
+        return emit_flags;
 
     /* XXX i#5400: By integrating drbbdup into drmgr we should be able to simplify
      * some of these awkward conditions where we have to handle a missing manager in
@@ -605,8 +617,6 @@ drbbdup_duplicate_phase(void *drcontext, void *tag, instrlist_t *bb, bool for_tr
         return emit_flags;
 
     if (is_thread_private) {
-        drbbdup_per_thread *pt =
-            (drbbdup_per_thread *)drmgr_get_tls_field(drcontext, tls_idx);
         emit_flags = drbbdup_do_duplication(&pt->manager_table, drcontext, tag, bb,
                                             for_trace, translating);
 
@@ -952,6 +962,9 @@ drbbdup_analyse_phase(void *drcontext, void *tag, instrlist_t *bb, bool for_trac
     /* Store analysis data in thread storage. */
     drbbdup_per_thread *pt =
         (drbbdup_per_thread *)drmgr_get_tls_field(drcontext, tls_idx);
+
+    if (pt->bb_disabled)
+        return DR_EMIT_DEFAULT;
 
     if (is_thread_private) {
         emit_flags = drbbdup_do_analysis(drcontext, pt, &pt->manager_table, tag, bb,
@@ -1711,6 +1724,9 @@ drbbdup_link_phase(void *drcontext, void *tag, instrlist_t *bb, instr_t *instr,
     drbbdup_per_thread *pt =
         (drbbdup_per_thread *)drmgr_get_tls_field(drcontext, tls_idx);
 
+    if (pt->bb_disabled)
+        return DR_EMIT_DEFAULT;
+
     ASSERT(opts.instrument_instr != NULL || opts.instrument_instr_ex != NULL,
            "instrumentation call-back must not be NULL");
 
@@ -2042,6 +2058,15 @@ drbbdup_is_last_instr(void *drcontext, instr_t *instr, bool *is_last)
 
     *is_last = pt->last_instr == instr;
 
+    return DRBBDUP_SUCCESS;
+}
+
+drbbdup_status_t
+drbbdup_set_enabled(bool enable)
+{
+    if (drbbdup_init_count == 0)
+        return DRBBDUP_ERROR_NOT_INITIALIZED;
+    enabled = enable;
     return DRBBDUP_SUCCESS;
 }
 
@@ -2467,6 +2492,7 @@ drbbdup_exit(void)
 
         /* Reset for re-attach. */
         new_case_cache_pc = NULL;
+        enabled = true;
 
     } else {
         /* Cannot have more than one initialisation of drbbdup. */

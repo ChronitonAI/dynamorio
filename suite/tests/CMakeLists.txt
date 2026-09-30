@@ -3141,6 +3141,10 @@ if (NOT RISCV64) # TODO i#3544: Port tests to RISC-V 64
   use_DynamoRIO_extension(client.drbbdup-analysis-test.dll drmgr)
   use_DynamoRIO_extension(client.drbbdup-analysis-test.dll drbbdup)
 
+  tobuild_ci(client.drbbdup-disable-test client-interface/drbbdup-disable-test.c "" "" "")
+  use_DynamoRIO_extension(client.drbbdup-disable-test.dll drmgr)
+  use_DynamoRIO_extension(client.drbbdup-disable-test.dll drbbdup)
+
   tobuild_appdll(client.drbbdup-drwrap-test client-interface/drbbdup-drwrap-test.c)
   get_target_path_for_execution(bbdupwrap_libpath
     client.drbbdup-drwrap-test.appdll "${location_suffix}")

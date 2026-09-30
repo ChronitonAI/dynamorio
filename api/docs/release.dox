@@ -349,6 +349,8 @@ Further non-compatibility-affecting changes include:
    and dr_unlink_flush_region_ex() and dr_delay_flush_region_ex(), whose
    #DR_FLUSH_EXACT flag limits a flush to the fragments that contain code from the
    region rather than all fragments built from the areas of code it overlaps.
+ - Added drbbdup_set_enabled() to have drbbdup leave the basic blocks built from then on
+   alone, for clients that need no duplication for a while.
 
 **************************************************
 <hr>
