@@ -7537,7 +7537,13 @@ pre_system_call(dcontext_t *dcontext)
            asmlinkage long sys_munmap(unsigned long addr, uint len)
          */
         app_pc addr = (app_pc)STRIP_MEMORY_TAG(sys_param(dcontext, 0));
-        size_t len = (size_t)sys_param(dcontext, 1);
+        /* The kernel unmaps whole pages: a length that is not a multiple of the page
+         * size includes the rest of its last page.  An address that is not page-aligned
+         * makes the munmap fail without unmapping anything.
+         */
+        size_t len = ALIGNED(addr, PAGE_SIZE)
+            ? ALIGN_FORWARD((size_t)sys_param(dcontext, 1), PAGE_SIZE)
+            : 0;
         LOG(THREAD, LOG_SYSCALLS, 2, "syscall: munmap addr=" PFX " size=" PFX "\n", addr,
             len);
         RSTATS_INC(num_app_munmaps);
