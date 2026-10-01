@@ -80,6 +80,8 @@ void
 test_inval_8(void);
 void
 test_inval_9(void);
+void
+test_inval_10(void);
 
 SIGJMP_BUF mark;
 static int count = 0;
@@ -273,6 +275,10 @@ main(int argc, char *argv[])
         test_inval_9();
         assert(false && "Won't reach due to fault");
         break;
+    case 10:
+        test_inval_10();
+        assert(false && "Won't reach due to fault");
+        break;
     default:;
     }
 
@@ -440,6 +446,18 @@ GLOBAL_LABEL(FUNCNAME:)
          */
         nop
         RAW(8c) RAW(f8)
+        ret
+        END_FUNC(FUNCNAME)
+#undef FUNCNAME
+#define FUNCNAME test_inval_10
+        DECLARE_FUNC(FUNCNAME)
+GLOBAL_LABEL(FUNCNAME:)
+        /* A reserved two-byte opcode, 0f 3b, followed by a syscall in the same
+         * block: what follows the 0f byte must not be taken for a cmp of eax
+         * before the syscall.
+         */
+        RAW(0f) RAW(3b) RAW(c0)
+        RAW(0f) RAW(05)
         ret
         END_FUNC(FUNCNAME)
 

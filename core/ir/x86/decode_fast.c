@@ -570,7 +570,9 @@ decode_sizeof_ex(void *drcontext, byte *start_pc, int *num_prefixes, uint *rip_r
                     bool implied_escape = (!vex3 && !evex_prefix) ||
                         ((vex3 || evex_prefix) && (vex_mm == 1));
                     if (implied_escape) {
-                        sz += sizeof_escape(dcontext, pc, addr16, &rip_rel_pc);
+                        int esc_sz = sizeof_escape(dcontext, pc, addr16, &rip_rel_pc);
+                        /* A reserved opcode: the instruction is invalid. */
+                        sz = (esc_sz == 0) ? 0 : sz + esc_sz;
                         goto decode_sizeof_done;
                     } else if (vex_mm == 2) {
                         sz +=
@@ -661,7 +663,16 @@ decode_sizeof_ex(void *drcontext, byte *start_pc, int *num_prefixes, uint *rip_r
     if (varlen == VARLEN_MODRM)
         sz += sizeof_modrm(dcontext, pc + 1, addr16, &rip_rel_pc);
     else if (varlen == VARLEN_ESCAPE) {
-        sz += sizeof_escape(dcontext, pc + 1, addr16, &rip_rel_pc);
+        int esc_sz = sizeof_escape(dcontext, pc + 1, addr16, &rip_rel_pc);
+        if (esc_sz == 0) {
+            /* A reserved two-byte opcode (e.g., 0f 04 or 0f 3b): the instruction
+             * is invalid.  We must not take the 0f byte for an instruction of its
+             * own, as the rest would then be decoded as the next instruction.
+             */
+            sz = 0;
+            goto decode_sizeof_done;
+        }
+        sz += esc_sz;
         /* special case: Intel and AMD added size-differing prefix-dependent instrs! */
         if (*(pc + 1) == 0x78) {
             /* XXX: if have rex.w prefix we clear word_operands: is that legal combo? */
