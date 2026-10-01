@@ -6157,6 +6157,10 @@ if (UNIX)
   # XXX i#1551, i#1569: port asm to ARM and AArch64
   # XXX i#58: port test to MacOS
   # TODO i#3544: Port tests to RISC-V 64
+  if (X86 AND X64 AND proc_supports_avx512)
+    tobuild(linux.avx512lazy-xrstor linux/avx512lazy-xrstor.asm)
+    append_pure_asm_app_link_flags(linux.avx512lazy-xrstor)
+  endif ()
   if (NOT ARM AND NOT AARCH64 AND NOT APPLE AND NOT RISCV64)
     tobuild(linux.sigcontext linux/sigcontext.c)
     set_avx_flags(linux.sigcontext)

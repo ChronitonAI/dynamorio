@@ -265,7 +265,10 @@ save_xmm(dcontext_t *dcontext, sigframe_rt_t *frame)
          */
         xstate->xstate_hdr.xstate_bv |= XCR0_FP | XCR0_SSE | XCR0_AVX;
 #ifdef X64
-        if (ZMM_ENABLED())
+        /* Without them in the mcontext (MCXT_AVX512_SAVED), the frame keeps the
+         * kernel's AVX-512 state: the physical registers, the application's.
+         */
+        if (ZMM_ENABLED() && MCXT_AVX512_SAVED(get_mcontext(dcontext)))
             xstate->xstate_hdr.xstate_bv |= XCR0_OPMASK | XCR0_ZMM_HI256 | XCR0_HI16_ZMM;
 #endif
     }
@@ -291,7 +294,7 @@ save_xmm(dcontext_t *dcontext, sigframe_rt_t *frame)
         }
 #endif
 #ifdef X64
-        if (ZMM_ENABLED()) {
+        if (ZMM_ENABLED() && MCXT_AVX512_SAVED(get_mcontext(dcontext))) {
             memcpy((byte *)xstate + proc_xstate_area_zmm_hi256_offs() + i * ZMMH_REG_SIZE,
                    ((void *)&get_mcontext(dcontext)->simd[i]) + ZMMH_REG_SIZE,
                    ZMMH_REG_SIZE);
@@ -309,7 +312,7 @@ save_xmm(dcontext_t *dcontext, sigframe_rt_t *frame)
 #endif
     }
 #ifdef X64
-    if (ZMM_ENABLED()) {
+    if (ZMM_ENABLED() && MCXT_AVX512_SAVED(get_mcontext(dcontext))) {
         for (i = 0; i < proc_num_opmask_registers(); i++) {
             memcpy((byte *)xstate + proc_xstate_area_kmask_offs() +
                        i * OPMASK_AVX512BW_REG_SIZE,
@@ -515,6 +518,7 @@ void
 sigcontext_to_mcontext_simd(priv_mcontext_t *mc, sig_full_cxt_t *sc_full)
 {
     sigcontext_t *sc = sc_full->sc;
+    MCXT_AVX512_SAVED(mc) = 0;
     if (sc->fpstate != NULL) {
         int i;
         for (i = 0; i < proc_num_simd_sse_avx_registers(); i++) {
@@ -564,6 +568,8 @@ sigcontext_to_mcontext_simd(priv_mcontext_t *mc, sig_full_cxt_t *sc_full)
                                i * OPMASK_AVX512BW_REG_SIZE,
                            OPMASK_AVX512BW_REG_SIZE);
                 }
+                /* Restored as such only once DR preserves them (MCXT_AVX512_SAVED). */
+                MCXT_AVX512_SAVED(mc) = d_r_is_avx512_code_in_use();
             }
         }
 #else
@@ -606,7 +612,7 @@ mcontext_to_sigcontext_simd(sig_full_cxt_t *sc_full, priv_mcontext_t *mc)
                  */
                 xstate->xstate_hdr.xstate_bv |= XCR0_SSE | XCR0_AVX;
 #ifdef X64
-                if (ZMM_ENABLED()) {
+                if (ZMM_ENABLED() && MCXT_AVX512_SAVED(mc)) {
                     xstate->xstate_hdr.xstate_bv |=
                         XCR0_OPMASK | XCR0_ZMM_HI256 | XCR0_HI16_ZMM;
                 }
@@ -614,7 +620,10 @@ mcontext_to_sigcontext_simd(sig_full_cxt_t *sc_full, priv_mcontext_t *mc)
             }
         }
 #ifdef X64
-        if (ZMM_ENABLED()) {
+        /* Without them in the mcontext (MCXT_AVX512_SAVED), the frame keeps the
+         * kernel's AVX-512 state: the physical registers, the application's.
+         */
+        if (ZMM_ENABLED() && MCXT_AVX512_SAVED(mc)) {
             kernel_xstate_t *xstate = (kernel_xstate_t *)sc->fpstate;
             if (sc->fpstate->sw_reserved.magic1 == FP_XSTATE_MAGIC1) {
                 /* The following three XCR0 bits should have been checked already

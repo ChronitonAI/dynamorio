@@ -107,6 +107,15 @@ mixed_mode_enabled(void)
 #    endif /* X64 */
 #    define SIMD_OFFSET ((MC_OFFS) + (offsetof(priv_mcontext_t, simd)))
 #    define OPMASK_OFFSET ((MC_OFFS) + (offsetof(priv_mcontext_t, opmask)))
+/* Whether the AVX-512 parts of a saved priv_mcontext_t (bits 256-511 of zmm0-15,
+ * zmm16-31 and k0-7) hold the application's values: whether the save that wrote it ran
+ * with d_r_is_avx512_code_in_use() set.  A restore must load those parts only then: the
+ * flag can be set between a save and its restore (by another thread, or by this one
+ * building a block), and the slots a save without them leaves alone hold stale data
+ * (on the dstack, DR's own).  One byte of the padding before simd.
+ */
+#    define MCXT_AVX512_SAVED(mc) ((mc)->padding[0])
+#    define AVX512_SAVED_OFFSET ((MC_OFFS) + (offsetof(priv_mcontext_t, padding)))
 #    define XFLAGS_OFFSET ((MC_OFFS) + (offsetof(priv_mcontext_t, xflags)))
 #    define SCRATCH_REG0 DR_REG_XAX
 #    define SCRATCH_REG1 DR_REG_XBX
@@ -1443,6 +1452,10 @@ pthread_jit_write_protect_np(int);
 
 void
 get_simd_vals(priv_mcontext_t *mc);
+#ifdef X86
+void
+mcontext_fill_avx512_state(priv_mcontext_t *mc);
+#endif
 
 /* i#350: Fast safe_read without dcontext.  On success or failure, returns the
  * current source pointer.  Requires fault handling to be set up.

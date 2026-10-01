@@ -226,6 +226,16 @@ insert_push_all_registers(dcontext_t *dcontext, clean_call_info_t *cci,
             }
         }
         if (ZMM_ENABLED()) {
+            /* What this save did, for the restore and dr_get_mcontext(): see
+             * MCXT_AVX512_SAVED.
+             */
+            if (clean_call_needs_simd(cci)) {
+                PRE(ilist, instr,
+                    INSTR_CREATE_mov_st(dcontext,
+                                        opnd_create_base_disp(REG_XSP, REG_NULL, 0,
+                                                              offs_beyond_xmm, OPSZ_1),
+                                        OPND_CREATE_INT8(0)));
+            }
             PRE(ilist, instr, INSTR_CREATE_jmp(dcontext, opnd_create_instr(post_push)));
             PRE(ilist, instr, pre_avx512_push /*label*/);
             uint opcode_avx512 = move_mm_avx512_reg_opcode(ALIGNED(alignment, 64));
@@ -255,6 +265,13 @@ insert_push_all_registers(dcontext_t *dcontext, clean_call_info_t *cci,
                         opnd_create_reg(DR_REG_START_OPMASK + (reg_id_t)i));
                     PRE(ilist, instr, maskmov);
                 }
+            }
+            if (clean_call_needs_simd(cci)) {
+                PRE(ilist, instr,
+                    INSTR_CREATE_mov_st(dcontext,
+                                        opnd_create_base_disp(REG_XSP, REG_NULL, 0,
+                                                              offs_beyond_xmm, OPSZ_1),
+                                        OPND_CREATE_INT8(1)));
             }
             PRE(ilist, instr, post_push /*label*/);
         }
@@ -379,14 +396,19 @@ insert_pop_all_registers(dcontext_t *dcontext, clean_call_info_t *cci, instrlist
         if (ZMM_ENABLED()) {
             post_pop = INSTR_CREATE_label(dcontext);
             pre_avx512_pop = INSTR_CREATE_label(dcontext);
-            PRE(ilist, instr,
-                INSTR_CREATE_cmp(dcontext,
-                                 OPND_CREATE_ABSMEM(vmcode_get_executable_addr(
-                                                        (byte *)d_r_avx512_code_in_use),
-                                                    OPSZ_1),
-                                 OPND_CREATE_INT8(0)));
-            PRE(ilist, instr,
-                INSTR_CREATE_jcc(dcontext, OP_jnz, opnd_create_instr(pre_avx512_pop)));
+            /* What the save did, not d_r_avx512_code_in_use: see MCXT_AVX512_SAVED.
+             * (Without a SIMD area in the frame there is nothing to restore.)
+             */
+            if (clean_call_needs_simd(cci)) {
+                PRE(ilist, instr,
+                    INSTR_CREATE_cmp(dcontext,
+                                     opnd_create_base_disp(REG_XSP, REG_NULL, 0,
+                                                           offs_beyond_xmm, OPSZ_1),
+                                     OPND_CREATE_INT8(0)));
+                PRE(ilist, instr,
+                    INSTR_CREATE_jcc(dcontext, OP_jnz,
+                                     opnd_create_instr(pre_avx512_pop)));
+            }
         }
         for (i = 0; i < proc_num_simd_sse_avx_saved(); i++) {
             if (!cci->simd_skip[i]) {
