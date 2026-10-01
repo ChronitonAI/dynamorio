@@ -2242,6 +2242,16 @@ mangle_single_step(dcontext_t *dcontext, instrlist_t *ilist, uint flags, instr_t
 #define FXSAVE_PC_OFFS 8
 #define FXSAVE_SIZE 512
 
+/* Returns whether op is an x87 instruction: one of the escape opcodes 0xd8-0xdf, or
+ * fwait.
+ */
+static bool
+opcode_is_x87(int op)
+{
+    return (op >= OP_fadd && op <= OP_fcomip) || op == OP_fisttp || op == OP_ffreep ||
+        op == OP_fwait;
+}
+
 void
 float_pc_update(dcontext_t *dcontext)
 {
@@ -2251,13 +2261,18 @@ float_pc_update(dcontext_t *dcontext)
     LOG(THREAD, LOG_INTERP, 2, "%s: fp state " PFX "\n", __FUNCTION__, state);
     if (dcontext->upcontext.upcontext.exit_reason == EXIT_REASON_FLOAT_PC_XSAVE ||
         dcontext->upcontext.upcontext.exit_reason == EXIT_REASON_FLOAT_PC_XSAVE64) {
-        /* Check whether the FPU state was saved */
+        /* Check whether the FPU state was saved: it must have been requested (edx:eax,
+         * which the instruction does not change, is the requested-feature bitmap), and
+         * xsaveopt and xsavec skip it when it is in its initial configuration, which
+         * the image's XSTATE_BV says.
+         */
         uint64 header_bv = *(uint64 *)(state + FXSAVE_SIZE);
-        if (!TESTANY(XCR0_FP, header_bv)) {
+        if (!TESTANY(XCR0_FP, get_mcontext(dcontext)->xax) ||
+            !TESTANY(XCR0_FP, header_bv)) {
             LOG(THREAD, LOG_INTERP, 2, "%s: xsave did not save FP state => nop\n",
                 __FUNCTION__);
+            return;
         }
-        return;
     }
 
     if (dcontext->upcontext.upcontext.exit_reason == EXIT_REASON_FLOAT_PC_FNSAVE) {
@@ -2349,20 +2364,28 @@ mangle_float_pc(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
         instr_t *prev;
         for (prev = instr_get_prev_expanded(dcontext, ilist, instr); prev != NULL;
              prev = instr_get_prev_expanded(dcontext, ilist, prev)) {
-            dr_instr_category_t type;
-            if (instr_is_app(prev) && instr_is_floating_type(prev, &type)) {
-                bool control_instr = false;
-                if (TESTANY(DR_INSTR_CATEGORY_STATE, type) /* quick check */ &&
-                    /* Check the list from Intel Vol 1 8.1.8 */
-                    (op == OP_fnclex || op == OP_fldcw || op == OP_fnstcw ||
-                     op == OP_fnstsw || op == OP_fnstenv || op == OP_fldenv ||
-                     op == OP_fwait))
-                    control_instr = true;
-                if (!control_instr) {
-                    prior_float = get_app_instr_xl8(prev);
-                    break;
-                }
-            }
+            int prev_op;
+            if (!instr_is_app(prev))
+                continue;
+            prev_op = instr_get_opcode(prev);
+            /* An instruction that loads or resets the last pc ends the search: the
+             * saved pc is then not a code cache pc, which d_r_dispatch leaves alone.
+             */
+            if (prev_op == OP_fninit || prev_op == OP_fnsave || prev_op == OP_frstor ||
+                prev_op == OP_fldenv || prev_op == OP_fxrstor32 ||
+                prev_op == OP_fxrstor64 || prev_op == OP_xrstor32 ||
+                prev_op == OP_xrstor64)
+                break;
+            /* Only x87 instructions set the last pc (not SSE, AVX or MMX ones, nor the
+             * fxsave and xsave families), and the control instructions from the list in
+             * Intel Vol 1 8.1.8 do not.
+             */
+            if (!opcode_is_x87(prev_op) || prev_op == OP_fnclex || prev_op == OP_fldcw ||
+                prev_op == OP_fnstcw || prev_op == OP_fnstsw || prev_op == OP_fnstenv ||
+                prev_op == OP_fwait)
+                continue;
+            prior_float = get_app_instr_xl8(prev);
+            break;
         }
     }
 
@@ -2468,7 +2491,7 @@ mangle_float_pc(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
     if (exit_is_normal && DYNAMO_OPTION(translate_fpu_pc)) {
         instr_t *exit_jmp = next_instr;
         while (exit_jmp != NULL && !instr_is_exit_cti(exit_jmp))
-            exit_jmp = instr_get_next(next_instr);
+            exit_jmp = instr_get_next(exit_jmp);
         ASSERT(exit_jmp != NULL);
         ASSERT(instr_branch_special_exit(exit_jmp));
         instr_branch_set_special_exit(exit_jmp, false);
