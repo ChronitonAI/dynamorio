@@ -1726,6 +1726,14 @@ decode_cti(void *drcontext, byte *pc, instr_t *instr)
 #ifdef UNIX
     /* mov_seg instruction detection for i#107: mangling seg update/query. */
     if (INTERNAL_OPTION(mangle_app_seg) && (byte0 == 0x8c || byte0 == 0x8e)) {
+        /* There are six segment registers: the reg field values 6 and 7 are
+         * invalid.  The bb builder decodes the operands of an OP_mov_seg, so we
+         * must not claim one that has none.
+         */
+        if (((byte1 >> 3) & 0x7) >= 6) {
+            instr_set_opcode(instr, OP_INVALID);
+            return NULL;
+        }
         instr_set_opcode(instr, OP_mov_seg);
         instr_set_raw_bits(instr, start_pc, sz);
         instr_set_rip_rel_pos(instr, rip_rel_pos);
