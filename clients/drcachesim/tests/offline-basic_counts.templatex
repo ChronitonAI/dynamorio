@@ -16,6 +16,8 @@ Bad instruction, instance 5
 Bad instruction, instance 6
 Bad instruction, instance 7
 Bad instruction, instance 8
+Bad instruction, instance 9
+Bad instruction, instance 10
 All done
 Basic counts tool results:
 Total counts:
@@ -32,9 +34,9 @@ Total counts:
      .* total idle markers
      .* total wait markers
 #if defined(WINDOWS) && !defined(X64)
-          26 total kernel transfer markers
+          30 total kernel transfer markers
 #else
-          13 total kernel transfer markers
+          15 total kernel transfer markers
 #endif
      .* total function id markers
      .* total function return address markers
@@ -60,9 +62,9 @@ Thread .* counts:
      .* idle markers
      .* wait markers
 #if defined(WINDOWS) && !defined(X64)
-          26 kernel transfer markers
+          30 kernel transfer markers
 #else
-          13 kernel transfer markers
+          15 kernel transfer markers
 #endif
      .* function id markers
      .* function return address markers

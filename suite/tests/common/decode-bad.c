@@ -76,6 +76,10 @@ void
 test_inval_6(void);
 void
 test_inval_7(void);
+void
+test_inval_8(void);
+void
+test_inval_9(void);
 
 SIGJMP_BUF mark;
 static int count = 0;
@@ -261,6 +265,14 @@ main(int argc, char *argv[])
         test_inval_7();
         assert(false && "Won't reach due to fault");
         break;
+    case 8:
+        test_inval_8();
+        assert(false && "Won't reach due to fault");
+        break;
+    case 9:
+        test_inval_9();
+        assert(false && "Won't reach due to fault");
+        break;
     default:;
     }
 
@@ -407,6 +419,27 @@ GLOBAL_LABEL(FUNCNAME:)
          * a register, this is invalid.
          */
         RAW(66) RAW(ff) RAW(d9)
+        ret
+        END_FUNC(FUNCNAME)
+#undef FUNCNAME
+#define FUNCNAME test_inval_8
+        DECLARE_FUNC(FUNCNAME)
+GLOBAL_LABEL(FUNCNAME:)
+        /* A mov to segment register 6, which does not exist, at the start of a
+         * block.
+         */
+        RAW(8e) RAW(30)
+        ret
+        END_FUNC(FUNCNAME)
+#undef FUNCNAME
+#define FUNCNAME test_inval_9
+        DECLARE_FUNC(FUNCNAME)
+GLOBAL_LABEL(FUNCNAME:)
+        /* A mov from segment register 7, which does not exist, after the start of
+         * a block.
+         */
+        nop
+        RAW(8c) RAW(f8)
         ret
         END_FUNC(FUNCNAME)
 
