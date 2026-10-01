@@ -6204,6 +6204,9 @@ if (UNIX)
   if (NOT APPLE)
     tobuild(linux.prctl linux/prctl.c)
   endif ()
+  if (LINUX AND X86) # The test writes x86 code.
+    tobuild(linux.munmap_unaligned linux/munmap_unaligned.c)
+  endif ()
   tobuild(linux.mmap linux/mmap.c)
   if (LINUX AND X86 AND X64) # The test writes x86 code; mseal is 64-bit only.
     tobuild(linux.sealed_code linux/sealed_code.c)
