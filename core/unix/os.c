@@ -9072,10 +9072,19 @@ static bool
 handle_app_mremap(dcontext_t *dcontext, byte *base, size_t size, byte *old_base,
                   size_t old_size, uint old_prot, uint old_type)
 {
+    bool made_readonly;
     if (!mmap_syscall_succeeded(base))
         return false;
-    if (base != old_base || size < old_size) { /* take action only if
-                                                * there was a change */
+    /* If we made the old region read-only to see changes to its code, the kernel
+     * gave the new region that protection too, and nothing would make it writable
+     * again once the old region is gone from our lists: the application's writes
+     * to it would fault.  We give it the application's protection back.  (An
+     * old_size of 0 duplicates a shared mapping and keeps the old one.)
+     */
+    made_readonly = is_executable_area_writable_overlap(
+                        old_base, old_base + (old_size == 0 ? 1 : old_size)) != NULL;
+    if (base != old_base || size < old_size ||
+        made_readonly) { /* take action only if there was a change */
         DEBUG_DECLARE(bool ok;)
         /* fragments were shifted...don't try to fix them, just flush */
         app_memory_deallocation(dcontext, (app_pc)old_base, old_size,
@@ -9087,6 +9096,14 @@ handle_app_mremap(dcontext_t *dcontext, byte *base, size_t size, byte *old_base,
             ASSERT_CURIOSITY(!module_overlaps(base, size));
             os_get_module_info_unlock();
         });
+        if (made_readonly) {
+            old_prot |= MEMPROT_WRITE;
+            if (!os_set_protection(base, size, old_prot)) {
+                LOG(THREAD, LOG_SYSCALLS | LOG_VMAREAS, 1,
+                    "mremap: cannot make " PFX "-" PFX " writable again\n", base,
+                    base + size);
+            }
+        }
         /* Verify that the current prot on the new region (according to
          * the os) is the same as what the prot used to be for the old
          * region.
