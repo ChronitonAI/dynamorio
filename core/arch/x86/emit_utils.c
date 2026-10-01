@@ -1324,11 +1324,10 @@ append_restore_simd_reg(dcontext_t *dcontext, instrlist_t *ilist, bool absolute)
     if (ZMM_ENABLED()) {
         post_restore = INSTR_CREATE_label(dcontext);
         pre_avx512_restore = INSTR_CREATE_label(dcontext);
+        /* What the save did, not d_r_avx512_code_in_use: see MCXT_AVX512_SAVED. */
         APP(ilist,
             INSTR_CREATE_cmp(
-                dcontext,
-                OPND_CREATE_ABSMEM(
-                    vmcode_get_executable_addr((byte *)d_r_avx512_code_in_use), OPSZ_1),
+                dcontext, OPND_DC_FIELD(absolute, dcontext, OPSZ_1, AVX512_SAVED_OFFSET),
                 OPND_CREATE_INT8(0)));
         APP(ilist,
             INSTR_CREATE_jcc(dcontext, OP_jnz, opnd_create_instr(pre_avx512_restore)));
@@ -1603,6 +1602,10 @@ append_save_simd_reg(dcontext_t *dcontext, instrlist_t *ilist, bool absolute)
                                    opnd_create_reg(REG_SAVED_XMM0 + (reg_id_t)i)));
     }
     if (ZMM_ENABLED()) {
+        APP(ilist,
+            INSTR_CREATE_mov_st(
+                dcontext, OPND_DC_FIELD(absolute, dcontext, OPSZ_1, AVX512_SAVED_OFFSET),
+                OPND_CREATE_INT8(0)));
         APP(ilist, INSTR_CREATE_jmp(dcontext, opnd_create_instr(post_save)));
         APP(ilist, pre_avx512_save /*label*/);
         uint opcode_avx512 = move_mm_avx512_reg_opcode(true /*align64*/);
@@ -1623,6 +1626,10 @@ append_save_simd_reg(dcontext_t *dcontext, instrlist_t *ilist, bool absolute)
                                   OPMASK_OFFSET + i * OPMASK_AVX512BW_REG_SIZE),
                     opnd_create_reg(DR_REG_START_OPMASK + (reg_id_t)i)));
         }
+        APP(ilist,
+            INSTR_CREATE_mov_st(
+                dcontext, OPND_DC_FIELD(absolute, dcontext, OPSZ_1, AVX512_SAVED_OFFSET),
+                OPND_CREATE_INT8(1)));
         APP(ilist, post_save /*label*/);
     }
 }

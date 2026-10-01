@@ -3451,6 +3451,71 @@ copy_mcontext(priv_mcontext_t *src, priv_mcontext_t *dst)
     *dst = *src;
 }
 
+#ifdef X86
+/* Makes the AVX-512 parts of a saved priv_mcontext_t of the current thread (bits
+ * 256-511 of zmm0-15, zmm16-31 and k0-7) the application's values, for code that reads
+ * them, when the save that wrote it didn't include them (see MCXT_AVX512_SAVED).
+ * Before d_r_is_avx512_code_in_use() is set the application has executed no AVX-512
+ * instruction (DR sets it when it first decodes one), so those parts are in their
+ * initial state: zero.  After it is set, they are still in the physical registers:
+ * DR's own code doesn't use them.
+ */
+void
+mcontext_fill_avx512_state(priv_mcontext_t *mc)
+{
+#    if defined(X64) && defined(UNIX)
+    if (!ZMM_ENABLED() || MCXT_AVX512_SAVED(mc))
+        return;
+    if (d_r_is_avx512_code_in_use()) {
+        dr_zmm_t zmm[MCXT_NUM_SIMD_SLOTS];
+        get_zmm_caller_saved(zmm);
+        get_opmask_caller_saved(mc->opmask);
+        for (int i = 0; i < MCXT_NUM_SIMD_SSE_AVX_SLOTS; i++) {
+            memcpy(&mc->simd[i].u8[YMM_REG_SIZE], &zmm[i].u8[YMM_REG_SIZE],
+                   ZMM_REG_SIZE - YMM_REG_SIZE);
+        }
+        for (int i = MCXT_NUM_SIMD_SSE_AVX_SLOTS; i < MCXT_NUM_SIMD_SLOTS; i++)
+            mc->simd[i] = zmm[i];
+        MCXT_AVX512_SAVED(mc) = 1;
+    } else {
+        for (int i = 0; i < MCXT_NUM_SIMD_SSE_AVX_SLOTS; i++) {
+            memset(&mc->simd[i].u8[YMM_REG_SIZE], 0, ZMM_REG_SIZE - YMM_REG_SIZE);
+        }
+        memset(&mc->simd[MCXT_NUM_SIMD_SSE_AVX_SLOTS], 0,
+               (MCXT_NUM_SIMD_SLOTS - MCXT_NUM_SIMD_SSE_AVX_SLOTS) * ZMM_REG_SIZE);
+        memset(mc->opmask, 0, sizeof(mc->opmask));
+    }
+#    endif
+}
+
+/* Sets MCXT_AVX512_SAVED of an mcontext just written with the full SIMD state. Nonzero
+ * AVX-512 state written before DR preserves it (a client setting it) makes DR preserve
+ * it from now on, as the application's first AVX-512 instruction does: otherwise it
+ * would not reach the registers.
+ */
+static void
+mcontext_set_avx512_saved(priv_mcontext_t *mc)
+{
+#    if defined(X64) && defined(UNIX)
+    if (ZMM_ENABLED() && !d_r_is_avx512_code_in_use()) {
+        bool nonzero = false;
+        for (int i = 0; i < MCXT_NUM_SIMD_SLOTS && !nonzero; i++) {
+            for (int j = i < MCXT_NUM_SIMD_SSE_AVX_SLOTS ? YMM_REG_SIZE : 0;
+                 j < ZMM_REG_SIZE && !nonzero; j++)
+                nonzero = mc->simd[i].u8[j] != 0;
+        }
+        for (int i = 0; i < MCXT_NUM_OPMASK_SLOTS && !nonzero; i++)
+            nonzero = mc->opmask[i] != 0;
+        if (nonzero) {
+            d_r_set_avx512_code_in_use(true, NULL);
+            proc_set_num_simd_saved(MCXT_NUM_SIMD_SLOTS);
+        }
+    }
+#    endif
+    MCXT_AVX512_SAVED(mc) = d_r_is_avx512_code_in_use();
+}
+#endif
+
 bool
 dr_mcontext_to_priv_mcontext(priv_mcontext_t *dst, dr_mcontext_t *src)
 {
@@ -3459,6 +3524,10 @@ dr_mcontext_to_priv_mcontext(priv_mcontext_t *dst, dr_mcontext_t *src)
         return false;
     if (TESTALL(DR_MC_ALL, src->flags) && src->size == sizeof(dr_mcontext_t)) {
         *dst = *(priv_mcontext_t *)(&MCXT_FIRST_REG_FIELD(src));
+#ifdef X86
+        /* (Not the padding of src.) */
+        mcontext_set_avx512_saved(dst);
+#endif
     } else {
         if (TESTANY(DR_MC_INTEGER, src->flags)) {
             /* xsp is in the middle of the mcxt, so we save dst->xsp here and
@@ -3503,6 +3572,11 @@ dr_mcontext_to_priv_mcontext(priv_mcontext_t *dst, dr_mcontext_t *src)
                      * AVX-512 extended number of registers in 64-bit Windows yet.
                      */
                     memcpy(&dst->simd, &src->simd, sizeof(dst->simd));
+                    if (src->size >=
+                        offsetof(dr_mcontext_t, opmask) + sizeof(dst->opmask)) {
+                        memcpy(&dst->opmask, &src->opmask, sizeof(dst->opmask));
+                        mcontext_set_avx512_saved(dst);
+                    }
                 } else if (MCXT_NUM_SIMD_SLOTS > MCXT_NUM_SIMD_SSE_AVX_SLOTS &&
                            src->size > offsetof(dr_mcontext_t, simd) +
                                    MCXT_NUM_SIMD_SSE_AVX_SLOTS * YMM_REG_SIZE) {

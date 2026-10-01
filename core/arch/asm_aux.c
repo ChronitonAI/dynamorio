@@ -61,6 +61,7 @@ get_simd_vals(priv_mcontext_t *mc)
         } else {
             get_xmm_caller_saved(&mc->simd[0]);
         }
+        MCXT_AVX512_SAVED(mc) = d_r_is_avx512_code_in_use();
     }
 #elif defined(ARM)
     /* XXX i#1551: no xmm but SIMD regs on ARM */

@@ -6822,6 +6822,9 @@ dr_get_mcontext_priv(dcontext_t *dcontext, dr_mcontext_t *dmc, priv_mcontext_t *
     /* PR 207947: support mcontext access from syscall events */
     if (dcontext->client_data->mcontext_in_dcontext ||
         dcontext->client_data->in_pre_syscall || dcontext->client_data->in_post_syscall) {
+#ifdef X86
+        mcontext_fill_avx512_state(get_mcontext(dcontext));
+#endif
         if (mc != NULL)
             *mc = *get_mcontext(dcontext);
         else if (!priv_mcontext_to_dr_mcontext(dmc, get_mcontext(dcontext)))
@@ -6836,6 +6839,9 @@ dr_get_mcontext_priv(dcontext_t *dcontext, dr_mcontext_t *dmc, priv_mcontext_t *
      * state from the dstack.
      */
     state = get_priv_mcontext_from_dstack(dcontext);
+#ifdef X86
+    mcontext_fill_avx512_state(state);
+#endif
     if (mc != NULL)
         *mc = *state;
     else if (!priv_mcontext_to_dr_mcontext(dmc, state))
