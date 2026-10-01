@@ -7,4 +7,7 @@ waiter: resumed after the system call wait, gate 1
 waiter: waiting in a signal event
 flush while waiting in a signal event: done
 waiter: resumed after the signal wait, gate 1
+waiter: waiting in a signal event for an undecodable instruction
+flush while waiting in a signal event for an undecodable instruction: done
+waiter: resumed after the signal wait, gate 1
 all done

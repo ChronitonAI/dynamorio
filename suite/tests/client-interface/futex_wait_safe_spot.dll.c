@@ -36,34 +36,61 @@
 #include "client_tools.h"
 #include "futex_wait_safe_spot-shared.h"
 
+#include <linux/futex.h>
 #include <signal.h>
 #include <sys/syscall.h>
+#include <unistd.h>
 
-/* Without the safe spot, a flush waits for the waiting thread for tens of seconds
- * before giving up.
+/* Without the safe spot, a synchronous flush waits for the waiting thread for tens
+ * of seconds before giving up, and a flush that unlinks waits for it forever (the
+ * watchdog below then wakes the waiting thread).
  */
 #define MAX_FLUSH_MS 10000
 
-static const char *const phase_names[NUM_PHASES] = { "a clean call",
-                                                     "a system call event",
-                                                     "a signal event" };
+static const char *const phase_names[NUM_PHASES] = {
+    "a clean call", "a system call event", "a signal event",
+    "a signal event for an undecodable instruction"
+};
 
 /* The futexes to wait on at the next getpid system call or SIGILL. */
 static volatile int *syscall_futex;
 static volatile int *signal_futex;
+static volatile int *decode_signal_futex;
 /* Set by the waiting thread just before it waits, where it waits. */
 static int waiting_phase = -1;
 static app_pc waiting_pc;
+static volatile int *waiting_futex;
 /* The number of phases for which the other thread flushed. */
 static int flushed_phases;
+/* When the flushes of the current phase started (0: none is in progress). */
+static volatile int64 flush_start;
 
 static void
 wait_on(void *drcontext, int phase, volatile int *futex, dr_mcontext_t *mc)
 {
     waiting_pc = mc->pc;
+    waiting_futex = futex;
     dr_atomic_store32(&waiting_phase, phase);
     if (!dr_futex_wait_at_safe_spot(drcontext, futex, 0, mc))
         dr_fprintf(STDERR, "dr_futex_wait_at_safe_spot failed\n");
+}
+
+/* A client thread that wakes the waiting thread if a flush waits for it, so that the
+ * test fails instead of hanging.
+ */
+static void
+watchdog(void *arg)
+{
+    for (;;) {
+        int64 start;
+        dr_sleep(100);
+        start = dr_atomic_load64(&flush_start);
+        if (start != 0 && (int64)dr_get_milliseconds() - start > MAX_FLUSH_MS &&
+            waiting_futex != NULL && dr_atomic_load32(waiting_futex) == 0) {
+            dr_atomic_store32(waiting_futex, 1);
+            syscall(SYS_futex, waiting_futex, FUTEX_WAKE, 1, NULL, NULL, 0);
+        }
+    }
 }
 
 static void
@@ -92,6 +119,9 @@ at_marker(uint kind, app_pc pc)
     }
     case MARKER_WAIT_IN_SYSCALL: syscall_futex = (volatile int *)mc.xdx; break;
     case MARKER_WAIT_IN_SIGNAL: signal_futex = (volatile int *)mc.xdx; break;
+    case MARKER_WAIT_IN_DECODE_SIGNAL:
+        decode_signal_futex = (volatile int *)mc.xdx;
+        break;
     case MARKER_FLUSH: {
         int phase = (int)mc.xdx;
         uint64 start, elapsed;
@@ -101,10 +131,19 @@ at_marker(uint kind, app_pc pc)
         while (dr_atomic_load32(&waiting_phase) != phase)
             dr_sleep(1);
         start = dr_get_milliseconds();
-        /* A synchronous flush of the waiting thread's code. */
+        dr_atomic_store64(&flush_start, (int64)start);
+        /* A synchronous flush of the waiting thread's code, which suspends all
+         * threads.
+         */
         if (!dr_flush_region_ex(waiting_pc, 1, flush_done, NULL))
             dr_fprintf(STDERR, "dr_flush_region_ex failed\n");
+        /* A flush that unlinks the fragments and waits for the threads that may be
+         * linking.
+         */
+        if (!dr_unlink_flush_region(waiting_pc, 1))
+            dr_fprintf(STDERR, "dr_unlink_flush_region failed\n");
         elapsed = dr_get_milliseconds() - start;
+        dr_atomic_store64(&flush_start, 0);
         if (elapsed < MAX_FLUSH_MS) {
             dr_fprintf(STDERR, "flush while waiting in %s: done\n", phase_names[phase]);
         } else {
@@ -166,10 +205,22 @@ event_signal(void *drcontext, dr_siginfo_t *info)
     if (info->sig == SIGILL && signal_futex != NULL) {
         volatile int *futex = signal_futex;
         signal_futex = NULL;
+        /* The ud2 faulted in the code cache. */
+        CHECK(info->raw_mcontext_valid, "SIGILL of ud2 not from the code cache");
         wait_on(drcontext, PHASE_SIGNAL, futex, info->mcontext);
         /* Skip the ud2.  We must not resume at the interrupted cache pc, which
          * may have been flushed.
          */
+        info->mcontext->pc += 2;
+        return DR_SIGNAL_REDIRECT;
+    }
+    if (info->sig == SIGILL && decode_signal_futex != NULL) {
+        volatile int *futex = decode_signal_futex;
+        decode_signal_futex = NULL;
+        /* DR raised it when it could not decode the instruction. */
+        CHECK(!info->raw_mcontext_valid, "SIGILL of fe /6 from the code cache");
+        wait_on(drcontext, PHASE_DECODE_SIGNAL, futex, info->mcontext);
+        /* Skip the 2-byte invalid instruction. */
         info->mcontext->pc += 2;
         return DR_SIGNAL_REDIRECT;
     }
@@ -183,4 +234,6 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
     dr_register_filter_syscall_event(event_filter_syscall);
     dr_register_pre_syscall_event(event_pre_syscall);
     dr_register_signal_event(event_signal);
+    if (!dr_create_client_thread(watchdog, NULL))
+        dr_fprintf(STDERR, "dr_create_client_thread failed\n");
 }
