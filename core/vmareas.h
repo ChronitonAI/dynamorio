@@ -777,6 +777,9 @@ is_driver_address(app_pc addr);
 bool
 is_unprotectable_address(app_pc addr);
 
+void
+vm_area_sandbox_app_memory(dcontext_t *dcontext, app_pc start, app_pc end, bool sandbox);
+
 /* XXX clean up: safe_apc_or_thread_target, apc_thread_policy_helper and
  * aslr_report_violation should all be ifdef WINDOWS, and may be in a
  * different file

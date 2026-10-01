@@ -134,9 +134,11 @@ enum {
     /* i#1114: for areas containing JIT code flushed via annotation or inference */
     VM_JIT_MANAGED = 0x2000,
 
-    /* A writable region that DR could not make read-only (e.g., the memory is sealed
-     * with mseal): its code is sandboxed (FRAG_SELFMOD_SANDBOXED) instead, and never
-     * switched to page protection by -sandbox2ro_threshold.
+    /* A region whose changes page protection cannot detect: a writable region that DR
+     * could not make read-only (e.g., the memory is sealed with mseal), or memory a
+     * client asked us to sandbox (dr_sandbox_app_memory()).  Its code is sandboxed
+     * (FRAG_SELFMOD_SANDBOXED) instead, and never switched to page protection by
+     * -sandbox2ro_threshold.
      */
     VM_NOT_PROTECTABLE = 0x4000,
 };
@@ -301,6 +303,13 @@ vm_area_vector_t *IAT_areas;
  * forth from page prot to sandboxing.
  */
 static vm_area_vector_t *written_areas;
+
+/* Memory whose code a client asked us to sandbox (dr_sandbox_app_memory()), as its
+ * contents can change without a write that we see, e.g., through a second mapping of
+ * the same memory at another address or in another process.  Executable areas that
+ * overlap it are split at its bounds.  Protected by the executable_areas lock.
+ */
+static vm_area_vector_t *sandboxed_areas;
 
 static void
 free_written_area(void *data);
@@ -1650,6 +1659,9 @@ vm_areas_init(void)
     VMVECTOR_ALLOC_VECTOR(written_areas, GLOBAL_DCONTEXT,
                           VECTOR_SHARED | VECTOR_NEVER_MERGE, written_areas);
     vmvector_set_callbacks(written_areas, free_written_area, NULL, NULL, NULL);
+    /* No lock of its own: the executable_areas lock protects it. */
+    VMVECTOR_ALLOC_VECTOR(sandboxed_areas, GLOBAL_DCONTEXT,
+                          VECTOR_SHARED | VECTOR_NO_LOCK, executable_areas);
 #ifdef PROGRAM_SHEPHERDING
     VMVECTOR_ALLOC_VECTOR(futureexec_areas, GLOBAL_DCONTEXT, VECTOR_SHARED,
                           futureexec_areas);
@@ -1824,6 +1836,8 @@ vm_areas_exit(void)
 
     vmvector_delete_vector(GLOBAL_DCONTEXT, written_areas);
     written_areas = NULL;
+    vmvector_delete_vector(GLOBAL_DCONTEXT, sandboxed_areas);
+    sandboxed_areas = NULL;
 
 #ifdef PROGRAM_SHEPHERDING
     DOLOG(1, LOG_VMAREAS, {
@@ -2715,6 +2729,70 @@ vm_area_load_coarse_unit(app_pc *start DR_PARAM_INOUT, app_pc *end DR_PARAM_INOU
     return info;
 }
 
+/* Returns whether a client asked us to sandbox the code at pc
+ * (dr_sandbox_app_memory()), and shrinks [*start, *end), which contains pc, to the
+ * part with the same answer.  The caller must hold the executable_areas lock.
+ */
+static bool
+clip_to_sandboxed_areas(app_pc pc, app_pc *start, app_pc *end)
+{
+    app_pc sb_start, sb_end, prev_end, next_start;
+    ASSERT_OWN_READWRITE_LOCK(true, &executable_areas->lock);
+    if (vmvector_empty(sandboxed_areas))
+        return false;
+    if (vmvector_lookup_data(sandboxed_areas, pc, &sb_start, &sb_end, NULL)) {
+        *start = MAX(*start, sb_start);
+        *end = MIN(*end, sb_end);
+        return true;
+    }
+    vmvector_lookup_prev_next(sandboxed_areas, pc, NULL, &prev_end, &next_start, NULL);
+    if (prev_end != NULL)
+        *start = MAX(*start, prev_end);
+    *end = MIN(*end, next_start);
+    return false;
+}
+
+/* Adds [start, end) with the given flags to the executable areas, except that the
+ * parts a client asked us to sandbox are added sandboxed: their code is not to be
+ * made read-only, as page protection cannot detect their changes.
+ */
+static void
+add_executable_vm_area_pieces(app_pc start, app_pc end, uint vm_flags, uint frag_flags,
+                              coarse_info_t *info _IF_DEBUG(const char *comment))
+{
+    app_pc pc = start;
+    if (!vmvector_overlap(sandboxed_areas, start, end)) {
+        add_executable_vm_area_helper(start, end, vm_flags, frag_flags,
+                                      info _IF_DEBUG(comment));
+        return;
+    }
+    ASSERT(!TESTANY(FRAG_COARSE_GRAIN, frag_flags) && info == NULL);
+    while (pc < end) {
+        app_pc piece_start = pc, piece_end = end;
+        uint piece_vm_flags = vm_flags, piece_frag_flags = frag_flags;
+        if (clip_to_sandboxed_areas(pc, &piece_start, &piece_end)) {
+            /* Callers make writable code read-only before they add it only where
+             * they do not sandbox it (and check_thread_vm_area() sandboxes these
+             * areas); elsewhere that happens on a first execution of a
+             * VM_DELAY_READONLY area, which we turn off here.  (VM_MADE_READONLY is
+             * VM_WRITABLE: a writable sandboxed area stays writable.)  Should a
+             * caller have made the piece read-only, it is writable again.
+             */
+            if (DR_MADE_READONLY(vm_flags) && !TESTANY(VM_DELAY_READONLY, vm_flags) &&
+                !TESTANY(FRAG_SELFMOD_SANDBOXED, frag_flags)) {
+                ASSERT_CURIOSITY(false && "sandboxed piece was made read-only");
+                vm_make_writable(piece_start, piece_end - piece_start);
+            }
+            piece_vm_flags |= VM_NOT_PROTECTABLE;
+            piece_vm_flags &= ~VM_DELAY_READONLY;
+            piece_frag_flags |= SANDBOX_FLAG();
+        }
+        add_executable_vm_area_helper(piece_start, piece_end, piece_vm_flags,
+                                      piece_frag_flags, NULL _IF_DEBUG(comment));
+        pc = piece_end;
+    }
+}
+
 /* NOTE : caller is responsible for ensuring that consistency conditions are
  * met, thus if the region is writable the caller must either mark it read
  * only or pass in the VM_DELAY_READONLY flag in which case
@@ -2752,6 +2830,9 @@ add_executable_vm_area(app_pc start, app_pc end, uint vm_flags, uint frag_flags,
         d_r_write_lock(&executable_areas->lock);
     }
     ASSERT_OWN_WRITE_LOCK(true, &executable_areas->lock);
+    /* Code a client asked us to sandbox is not managed in coarse-grain units. */
+    if (vmvector_overlap(sandboxed_areas, start, end))
+        frag_flags &= ~FRAG_COARSE_GRAIN;
     /* XXX: rather than change all callers who already hold exec_areas lock
      * to first grab hotp lock, we don't support perscache in those cases.
      * We expect to only be adding a coarse-grain area for module loads.
@@ -2784,7 +2865,7 @@ add_executable_vm_area(app_pc start, app_pc end, uint vm_flags, uint frag_flags,
         frag_flags &= ~FRAG_COARSE_GRAIN;
 
     if (existing_area == NULL) {
-        add_executable_vm_area_helper(start, end, vm_flags, frag_flags,
+        add_executable_vm_area_pieces(start, end, vm_flags, frag_flags,
                                       info _IF_DEBUG(comment));
     } else {
         /* we shouldn't need the other parts of _helper() */
@@ -3961,6 +4042,32 @@ is_driver_address(app_pc addr)
         return TESTANY(VM_DRIVER_ADDRESS, vm_flags);
     }
     return false;
+}
+
+/* Starts (sandbox) or stops sandboxing the code in [start, end), at a client's request
+ * (dr_sandbox_app_memory()), and flushes the code built from it, which is rebuilt as
+ * it now must be.  The caller must hold no locks, and must be at a point where
+ * flushing is allowed.
+ */
+void
+vm_area_sandbox_app_memory(dcontext_t *dcontext, app_pc start, app_pc end, bool sandbox)
+{
+    ASSERT(ALIGNED(start, PAGE_SIZE) && ALIGNED(end, PAGE_SIZE) && start < end);
+    LOG(THREAD, LOG_VMAREAS, 1, "%s sandboxing " PFX "-" PFX "\n",
+        sandbox ? "starting" : "stopping", start, end);
+    executable_areas_lock();
+    if (sandbox)
+        vmvector_add(sandboxed_areas, start, end, NULL);
+    else
+        vmvector_remove(sandboxed_areas, start, end);
+    executable_areas_unlock();
+    /* Areas that overlap the range are removed, which gives back any write permission
+     * we took away to detect code changes: executing their code adds them anew, split
+     * at the bounds of the sandboxed areas.
+     */
+    flush_fragments_and_remove_region(dcontext, start, end - start,
+                                      false /*don't own initexit_lock*/,
+                                      false /*keep futures*/);
 }
 
 /* Returns true if an executable area exists at addr that is writable and that DR
@@ -7999,6 +8106,19 @@ check_thread_vm_area(dcontext_t *dcontext, app_pc pc, app_pc tag, void **vmlist,
             d_r_read_unlock(&written_areas->lock);
         } else
             STATS_INC(num_ro2sandbox_other_sub);
+    }
+    if (area == NULL) {
+        /* A new area is either all or none in what a client asked us to sandbox, and
+         * the former we must not make read-only below.
+         */
+        app_pc new_start = base_pc, new_end = base_pc + size;
+        ASSERT(own_execareas_writelock);
+        if (clip_to_sandboxed_areas(pc, &new_start, &new_end)) {
+            frag_flags |= SANDBOX_FLAG();
+            vm_flags |= VM_NOT_PROTECTABLE;
+        }
+        base_pc = new_start;
+        size = new_end - new_start;
     }
 
     /* now that we know about new area, decide whether it's compatible to be

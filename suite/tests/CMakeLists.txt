@@ -2923,6 +2923,9 @@ if (X86 OR AARCH64) # XXX i#1551: port asm to ARM
 endif (X86 OR AARCH64)
 # XXX: PR 199115 to re-enable fragdel, get some more of the UNIX tests working
 #tobuild_ci(client.fragdel client-interface/fragdel.c "" "" "")
+if (LINUX AND X86 AND X64)
+  tobuild_ci(client.sandbox_app_memory client-interface/sandbox_app_memory.c "" "" "")
+endif ()
 if (PROGRAM_SHEPHERDING)
   tobuild_ci(client.security client-interface/security.c "" "-security_api" "")
 endif (PROGRAM_SHEPHERDING)
