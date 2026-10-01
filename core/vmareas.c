@@ -133,6 +133,12 @@ enum {
 
     /* i#1114: for areas containing JIT code flushed via annotation or inference */
     VM_JIT_MANAGED = 0x2000,
+
+    /* A writable region that DR could not make read-only (e.g., the memory is sealed
+     * with mseal): its code is sandboxed (FRAG_SELFMOD_SANDBOXED) instead, and never
+     * switched to page protection by -sandbox2ro_threshold.
+     */
+    VM_NOT_PROTECTABLE = 0x4000,
 };
 
 /* simple way to disable sandboxing */
@@ -660,13 +666,22 @@ vm_make_writable(byte *pc, size_t size)
     ASSERT(INTERNAL_OPTION(hw_cache_consistency));
 }
 
-static void
+/* Returns false if the region could not be made read-only (its protection is then
+ * unchanged): the caller must sandbox its code instead.
+ */
+static bool
 vm_make_unwritable(byte *pc, size_t size)
 {
     byte *start_pc = (byte *)ALIGN_BACKWARD(pc, PAGE_SIZE);
     size_t final_size = ALIGN_FORWARD(size + (pc - start_pc), PAGE_SIZE);
+    bool ok;
     ASSERT(INTERNAL_OPTION(hw_cache_consistency));
-    make_unwritable(start_pc, final_size);
+    ok = make_unwritable(start_pc, final_size);
+    if (!ok) {
+        LOG(GLOBAL, LOG_VMAREAS, 1, "Cannot make " PFX "-" PFX " read-only\n", start_pc,
+            start_pc + final_size);
+        STATS_INC(num_unprotectable_code_regions);
+    }
 
     /* case 8308: We should never call vm_make_unwritable if
      * -sandbox_writable is on, or if -sandbox_non_text is on and this
@@ -680,6 +695,7 @@ vm_make_unwritable(byte *pc, size_t size)
                    is_range_in_code_section(modbase, pc, pc + size, NULL, NULL));
         }
     });
+    return ok;
 }
 
 /* since dynamorio changes some readwrite memory regions to read only,
@@ -2719,7 +2735,8 @@ add_executable_vm_area(app_pc start, app_pc end, uint vm_flags, uint frag_flags,
     {
         /* we only expect certain flags */
         uint expect = VM_WRITABLE | VM_UNMOD_IMAGE | VM_MADE_READONLY |
-            VM_DELAY_READONLY | VM_WAS_FUTURE | VM_EXECUTED_FROM | VM_DRIVER_ADDRESS;
+            VM_DELAY_READONLY | VM_WAS_FUTURE | VM_EXECUTED_FROM | VM_DRIVER_ADDRESS |
+            VM_NOT_PROTECTABLE;
 #    ifdef PROGRAM_SHEPHERDING
         expect |= VM_PATTERN_REVERIFY;
 #    endif
@@ -3942,6 +3959,19 @@ is_driver_address(app_pc addr)
     uint vm_flags;
     if (get_executable_area_vm_flags(addr, &vm_flags)) {
         return TESTANY(VM_DRIVER_ADDRESS, vm_flags);
+    }
+    return false;
+}
+
+/* Returns true if an executable area exists at addr that is writable and that DR
+ * could not make read-only, so that its code must stay sandboxed.
+ */
+bool
+is_unprotectable_address(app_pc addr)
+{
+    uint vm_flags;
+    if (get_executable_area_vm_flags(addr, &vm_flags)) {
+        return TESTANY(VM_NOT_PROTECTABLE, vm_flags);
     }
     return false;
 }
@@ -7229,8 +7259,13 @@ handle_delay_readonly(dcontext_t *dcontext, app_pc pc, vm_area_t *area)
      * so region would already have had to go through here */
     ASSERT(!TESTANY(FRAG_SELFMOD_SANDBOXED, area->frag_flags));
     if (!is_on_stack(dcontext, pc, NULL) && INTERNAL_OPTION(hw_cache_consistency)) {
-        vm_make_unwritable(area->start, area->end - area->start);
-        area->vm_flags |= VM_MADE_READONLY;
+        if (vm_make_unwritable(area->start, area->end - area->start))
+            area->vm_flags |= VM_MADE_READONLY;
+        else {
+            /* We cannot detect writes to the region with page protection. */
+            area->vm_flags |= VM_NOT_PROTECTABLE;
+            area->frag_flags |= FRAG_SELFMOD_SANDBOXED;
+        }
     } else {
         /* this could happen if app changed mem protection on its
          * stack that triggered us adding a delay_readonly writable
@@ -8154,9 +8189,17 @@ check_thread_vm_area(dcontext_t *dcontext, app_pc pc, app_pc tag, void **vmlist,
                      * desired XXX */
                     SYSLOG_INTERNAL_WARNING_ONCE("new executable vm area is writable.");
 #endif
-                    vm_make_unwritable(base_pc, size);
-                    vm_flags |= VM_MADE_READONLY;
-                    STATS_INC(num_rw2r_code_regions);
+                    if (vm_make_unwritable(base_pc, size)) {
+                        vm_flags |= VM_MADE_READONLY;
+                        STATS_INC(num_rw2r_code_regions);
+                    } else {
+                        /* We cannot detect writes to the region with page
+                         * protection (e.g., the memory is sealed), so we sandbox
+                         * its code instead.
+                         */
+                        vm_flags |= VM_NOT_PROTECTABLE;
+                        frag_flags |= SANDBOX_FLAG();
+                    }
                 }
             }
             /* now add the new region to the global list */
@@ -11143,7 +11186,15 @@ vm_area_selfmod_check_clear_exec_count(dcontext_t *dcontext, fragment_t *f)
         /* flush_* grabbed executable_areas lock for us */
         ok = lookup_addr(executable_areas, f->tag, &exec_area);
         if (ok) {
-            if (TESTANY(FRAG_SELFMOD_SANDBOXED, exec_area->frag_flags)) {
+            if (TESTANY(FRAG_SELFMOD_SANDBOXED, exec_area->frag_flags) &&
+                !vm_make_unwritable(exec_area->start,
+                                    exec_area->end - exec_area->start)) {
+                /* The area cannot be made read-only after all (e.g., it is sealed): it
+                 * stays sandboxed, and its fragments are rebuilt without the
+                 * -sandbox2ro_threshold counter.
+                 */
+                exec_area->vm_flags |= VM_NOT_PROTECTABLE;
+            } else if (TESTANY(FRAG_SELFMOD_SANDBOXED, exec_area->frag_flags)) {
                 /* XXX: if exec area is larger than flush area, it's
                  * ok since marking fragments in a ro region as selfmod
                  * is not a correctness problem.  Current flush impl, though,
@@ -11156,7 +11207,6 @@ vm_area_selfmod_check_clear_exec_count(dcontext_t *dcontext, fragment_t *f)
                     exec_area->end);
                 exec_area->frag_flags &= ~FRAG_SELFMOD_SANDBOXED;
                 /* can't ASSERT(!TESTANY(VM_MADE_READONLY, area->vm_flags)) (case 7877) */
-                vm_make_unwritable(exec_area->start, exec_area->end - exec_area->start);
                 exec_area->vm_flags |= VM_MADE_READONLY;
                 /* i#942: Remove the sandboxed area and re-add it to merge it
                  * back with any areas it used to be a part of.

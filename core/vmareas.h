@@ -774,6 +774,9 @@ is_address_on_stack(dcontext_t *dcontext, app_pc address);
 bool
 is_driver_address(app_pc addr);
 
+bool
+is_unprotectable_address(app_pc addr);
+
 /* XXX clean up: safe_apc_or_thread_target, apc_thread_policy_helper and
  * aslr_report_violation should all be ifdef WINDOWS, and may be in a
  * different file

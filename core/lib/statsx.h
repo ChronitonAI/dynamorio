@@ -224,6 +224,8 @@ STATS_DEF("Code origin addresses in last area", looked_up_in_last_area)
 
 STATS_DEF("Writable code regions", num_writable_code_regions)
 STATS_DEF("Writable code regions we made read-only", num_rw2r_code_regions)
+STATS_DEF("Writable code regions we could not make read-only",
+          num_unprotectable_code_regions)
 STATS_DEF("Writable executable regions we made read-only", num_delayed_rw2r)
 STATS_DEF("Memory regions marked as sandboxed", num_selfmod_vm_areas)
 STATS_DEF("Code regions not switched due to other sub-page", num_ro2sandbox_other_sub)

@@ -550,8 +550,10 @@ make_unhookable(byte *pc, size_t size, bool changed_prot);
 bool
 make_writable(byte *pc, size_t size);
 /* requires that pc is page aligned and size is multiple of the page size
- * and marks that memory NOT writable, preserves other flags */
-void
+ * and marks that memory NOT writable, preserves other flags,
+ * returns false if the protection could not be changed (it is then unchanged)
+ */
+bool
 make_unwritable(byte *pc, size_t size);
 /* like make_writable but adds COW (note: only usable if allocated COW) */
 bool
