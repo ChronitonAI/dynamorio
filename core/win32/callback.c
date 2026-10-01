@@ -6119,6 +6119,13 @@ initialize_exception_record(EXCEPTION_RECORD *rec, app_pc exception_address,
 void
 os_forge_exception(app_pc exception_address, dr_exception_type_t exception_type)
 {
+    os_forge_exception_access(exception_address, exception_address, exception_type);
+}
+
+void
+os_forge_exception_access(app_pc exception_address, app_pc access_address,
+                          dr_exception_type_t exception_type)
+{
     dcontext_t *dcontext = get_thread_private_dcontext();
     EXCEPTION_RECORD excrec;
     int res;
@@ -6133,6 +6140,8 @@ os_forge_exception(app_pc exception_address, dr_exception_type_t exception_type)
         exception_type, exception_address);
 
     initialize_exception_record(&excrec, exception_address, exception_type);
+    if (excrec.NumberParameters >= 2)
+        excrec.ExceptionInformation[1] = (ptr_uint_t)access_address;
     dcontext->forged_exception_addr = exception_address;
 
     /* we first get full context, and then convert it using saved app context */

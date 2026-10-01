@@ -7711,6 +7711,13 @@ is_signal_restorer_code(byte *pc, size_t *len)
 void
 os_forge_exception(app_pc target_pc, dr_exception_type_t type)
 {
+    os_forge_exception_access(target_pc, target_pc, type);
+}
+
+void
+os_forge_exception_access(app_pc target_pc, app_pc access_address,
+                          dr_exception_type_t type)
+{
     /* PR 205136:
      * We want to deliver now, and the caller expects us not to return.
      * We have two alternatives:
@@ -7772,7 +7779,7 @@ os_forge_exception(app_pc target_pc, dr_exception_type_t type)
      * infinite loop (i#3171).
      */
     frame->info.si_code = IF_LINUX_ELSE(SI_KERNEL, 0);
-    frame->info.si_addr = target_pc;
+    frame->info.si_addr = access_address;
 #ifdef X86_32
     frame->sig = sig;
     frame->pinfo = &frame->info;

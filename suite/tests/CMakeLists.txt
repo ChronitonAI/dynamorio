@@ -6117,6 +6117,11 @@ if (UNIX)
   if (NOT APPLE)
     tobuild(linux.prctl linux/prctl.c)
   endif ()
+  if (LINUX AND X86 AND X64) # The test writes x86-64 code.
+    tobuild(linux.code_page_end linux/code_page_end.c)
+    # With a basic block event, DR decodes every instruction fully.
+    tobuild_ci(linux.code_page_end-client linux/code_page_end.c "" "" "")
+  endif ()
   tobuild(linux.mmap linux/mmap.c)
   tobuild(linux.zero-length-mem-ranges linux/zero-length-mem-ranges.c)
   tobuild(linux.signal0000 linux/signal0000.c)

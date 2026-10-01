@@ -680,14 +680,20 @@ decode_sizeof_ex(void *drcontext, byte *start_pc, int *num_prefixes, uint *rip_r
         CLIENT_ASSERT(varlen == VARLEN_NONE, "internal decoding error");
 
     /* special case that doesn't fit the mold (of course one had to exist) */
-    reg_opcode = (byte)(((*(pc + 1)) & 0x38) >> 3);
-    if (opc == 0xf6 && reg_opcode == 0) {
-        sz += 1; /* TEST Eb,ib -- add size of immediate */
-    } else if (opc == 0xf7 && reg_opcode == 0) {
-        if (word_operands)
-            sz += 2; /* TEST Ew,iw -- add size of immediate */
-        else
-            sz += 4; /* TEST El,il -- add size of immediate */
+    if (opc == 0xf6 || opc == 0xf7) {
+        /* We read the ModRM byte only for these: after any other opcode, the next
+         * byte need not belong to the instruction, nor be readable (the instruction
+         * can end at the end of the last page of its mapping).
+         */
+        reg_opcode = (byte)(((*(pc + 1)) & 0x38) >> 3);
+        if (opc == 0xf6 && reg_opcode == 0) {
+            sz += 1; /* TEST Eb,ib -- add size of immediate */
+        } else if (opc == 0xf7 && reg_opcode == 0) {
+            if (word_operands)
+                sz += 2; /* TEST Ew,iw -- add size of immediate */
+            else
+                sz += 4; /* TEST El,il -- add size of immediate */
+        }
     }
     /* Another special case: xbegin. */
     if (opc == 0xc7 && *(pc + 1) == 0xf8)
@@ -1338,7 +1344,10 @@ decode_cti(void *drcontext, byte *pc, instr_t *instr)
     IF_X64(instr_set_x86_mode(instr, get_x86_mode(dcontext)));
 
     byte0 = *(pc + prefixes);
-    byte1 = *(pc + prefixes + 1);
+    /* We must not read past the instruction: it can end at the end of the last page
+     * of its mapping.  byte1 is only used for opcodes that have a second byte.
+     */
+    byte1 = (prefixes + 1 < sz) ? *(pc + prefixes + 1) : 0;
 
     /* we call instr_set_raw_bits on every return from here, not up
      * front, because any instr_set_src, instr_set_dst, or

@@ -892,6 +892,91 @@ bb_process_invalid_instr(dcontext_t *dcontext, build_bb_t *bb)
     }
 }
 
+/* Whether the instruction at bb->cur_pc can extend beyond the vmarea checked so far,
+ * into memory that need not be readable.  This is on the hot path of decoding: the
+ * first comparison is false for almost every instruction (it is true for a NULL
+ * checked_end).
+ */
+static inline bool
+bb_instr_may_reach_unchecked_area(build_bb_t *bb, dcontext_t *my_dcontext)
+{
+    return bb->cur_pc + MAX_INSTR_LENGTH > bb->checked_end && bb->check_vm_area &&
+        bb->checked_end != NULL && my_dcontext != NULL;
+}
+
+/* Decodes the instruction at bb->cur_pc into bb->instr, as the bb builder's loop does,
+ * for an instruction that can extend beyond the vmarea checked so far
+ * (bb_instr_may_reach_unchecked_area()).  If the instruction extends into memory that
+ * cannot be read (the page after the end of a mapping), decoding it faults, and so does
+ * executing it.  We catch that here: if we relied on our signal handler, it would abort
+ * the whole bb and raise the fault at the bb's start, before the instructions before
+ * this one, and at the address the decoder read rather than the start of the
+ * instruction (or, where the address it computed for a read that straddles the end of
+ * the readable memory is readable, not raise it at all).  Returns false for such an
+ * instruction, with bb->instr invalid and bb->cur_pc NULL.
+ */
+static bool
+bb_decode_instr_at_area_end(dcontext_t *dcontext, dcontext_t *my_dcontext, build_bb_t *bb)
+{
+    bool unreadable = false;
+    TRY_EXCEPT(
+        my_dcontext,
+        {
+            bb->cur_pc = bb->full_decode
+                ? IF_AARCH64_ELSE(decode_with_ldstex, decode)(dcontext, bb->cur_pc,
+                                                              bb->instr)
+                : IF_AARCH64_ELSE(decode_cti_with_ldstex,
+                                  decode_cti)(dcontext, bb->cur_pc, bb->instr);
+        },
+        { /* EXCEPT */
+          unreadable = true;
+        });
+    if (!unreadable && bb->cur_pc != NULL && bb->cur_pc > bb->checked_end) {
+        /* The fast decoder finds the length of most instructions without reading
+         * all of their bytes.
+         */
+        byte bytes[MAX_INSTR_LENGTH];
+        size_t size = bb->cur_pc - bb->instr_start;
+        ASSERT(size <= sizeof(bytes));
+        unreadable = !d_r_safe_read(bb->instr_start, MIN(size, sizeof(bytes)), bytes);
+    }
+    if (unreadable) {
+        instr_reset(dcontext, bb->instr);
+        instr_set_opcode(bb->instr, OP_INVALID);
+        bb->cur_pc = NULL;
+        return false;
+    }
+    return true;
+}
+
+/* The instruction at bb->instr_start extends into memory that cannot be read, which
+ * we found by decoding it, so executing it faults with the pc at its start.  As for
+ * an invalid instruction, we end the bb before it, so that the instructions before
+ * it execute, and raise the fault only if it is the first instruction.
+ */
+static void
+bb_process_unreadable_instr(dcontext_t *dcontext, build_bb_t *bb)
+{
+    LOG(THREAD, LOG_INTERP, 2,
+        "interp: instr at " PFX " extends into unreadable memory\n", bb->instr_start);
+    if (bb->app_interp && bb->instr_start == bb->start_pc) {
+        /* The first byte that cannot be read is the start of the next page, unless
+         * the instruction's own page went away in the meantime.
+         */
+        app_pc fault_addr = bb->instr_start;
+        if (is_readable_without_exception(fault_addr, 1))
+            fault_addr = (app_pc)PAGE_START(fault_addr) + PAGE_SIZE;
+        ASSERT(dcontext->bb_build_info == bb);
+        bb_build_abort(dcontext, true /*clean vm area*/, true /*unlock*/);
+        os_forge_exception_access(bb->instr_start, fault_addr,
+                                  UNREADABLE_MEMORY_EXECUTION_EXCEPTION);
+        ASSERT_NOT_REACHED();
+    } else {
+        instr_destroy(dcontext, bb->instr);
+        bb->instr = NULL;
+    }
+}
+
 /* TODO i#1668, i#2974: NYI on ARM/AArch64 */
 #ifdef X86
 /* returns true to indicate "elide and continue" and false to indicate "end bb now"
@@ -3237,6 +3322,7 @@ build_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
     dcontext_t *my_dcontext = get_thread_private_dcontext();
     DEBUG_DECLARE(bool regenerated = false;)
     bool stop_bb_on_fallthrough = false;
+    bool unreadable_instr = false;
 
     ASSERT(bb->initialized);
     /* note that it's ok for bb->start_pc to be NULL as our check_new_page_start
@@ -3388,19 +3474,30 @@ build_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
             bb->instr_start = bb->cur_pc;
             if (bb->full_decode) {
                 /* only going through this do loop once! */
-                bb->cur_pc = IF_AARCH64_ELSE(decode_with_ldstex,
-                                             decode)(dcontext, bb->cur_pc, bb->instr);
+                if (!bb_instr_may_reach_unchecked_area(bb, my_dcontext)) {
+                    bb->cur_pc = IF_AARCH64_ELSE(decode_with_ldstex,
+                                                 decode)(dcontext, bb->cur_pc, bb->instr);
+                } else if (!bb_decode_instr_at_area_end(dcontext, my_dcontext, bb)) {
+                    /* Handled like an invalid instruction, below. */
+                    unreadable_instr = true;
+                    break;
+                }
                 if (bb->record_translation)
                     instr_set_translation(bb->instr, bb->instr_start);
             } else {
                 /* must reset, may go through loop multiple times */
                 instr_reset(dcontext, bb->instr);
-                bb->cur_pc = IF_AARCH64_ELSE(decode_cti_with_ldstex,
-                                             decode_cti)(dcontext, bb->cur_pc, bb->instr);
-
+                if (!bb_instr_may_reach_unchecked_area(bb, my_dcontext)) {
+                    bb->cur_pc = IF_AARCH64_ELSE(decode_cti_with_ldstex, decode_cti)(
+                        dcontext, bb->cur_pc, bb->instr);
+                } else if (!bb_decode_instr_at_area_end(dcontext, my_dcontext, bb)) {
+                    /* Handled like an invalid instruction, below. */
+                    unreadable_instr = true;
+                    break;
+                }
 #if defined(ANNOTATIONS) && !(defined(X64) && defined(WINDOWS))
                 /* Quickly check whether this may be a Valgrind annotation. */
-                if (is_encoded_valgrind_annotation_tail(bb->instr_start)) {
+                if (is_encoded_valgrind_annotation_tail(bb->instr_start, bb->cur_pc)) {
                     /* Might be an annotation, so try the (slower) full check. */
                     if (is_encoded_valgrind_annotation(bb->instr_start, bb->start_pc,
                                                        (app_pc)PAGE_START(bb->cur_pc))) {
@@ -3427,9 +3524,10 @@ build_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
                  * Ideally we'd want to check BEFORE we decode from the
                  * subsequent page, as it could be inaccessible, but not worth
                  * the time estimating the size from a variable number of bytes
-                 * before the page boundary.  Instead we rely on other
-                 * mechanisms to handle faults while decoding, which we need
-                 * anyway to handle racy unmaps by the app.
+                 * before the page boundary.  Instead we decode under TRY where
+                 * the instruction can reach an unchecked page (above), and rely
+                 * on other mechanisms to handle faults while decoding, which we
+                 * need anyway to handle racy unmaps by the app.
                  */
                 uint old_flags = bb->flags;
                 DEBUG_DECLARE(bool is_first_instr = (bb->instr_start == bb->start_pc));
@@ -3640,7 +3738,10 @@ build_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
         });
 
         if (!instr_valid(bb->instr)) {
-            bb_process_invalid_instr(dcontext, bb);
+            if (unreadable_instr)
+                bb_process_unreadable_instr(dcontext, bb);
+            else
+                bb_process_invalid_instr(dcontext, bb);
             break;
         }
 
