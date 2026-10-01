@@ -5325,7 +5325,7 @@ make_copy_on_writable(byte *pc, size_t size)
 }
 
 /* make pc's page unwritable */
-void
+bool
 make_unwritable(byte *pc, size_t size)
 {
     app_pc start_page = (app_pc)PAGE_START(pc);
@@ -5349,10 +5349,17 @@ make_unwritable(byte *pc, size_t size)
     /* inc stats before making unwritable, in case messing w/ data segment */
     STATS_INC(protection_change_calls);
     STATS_ADD(protection_change_pages, size / PAGE_SIZE);
-    DEBUG_DECLARE(long res =) mprotect_syscall((void *)start_page, prot_size, prot);
-    LOG(THREAD_GET, LOG_VMAREAS, 3, "make_unwritable: pc " PFX " -> " PFX "-" PFX "\n",
-        pc, start_page, start_page + prot_size);
-    ASSERT(res == 0);
+    long res = mprotect_syscall((void *)start_page, prot_size, prot);
+    LOG(THREAD_GET, LOG_VMAREAS, 3, "make_unwritable: pc " PFX " -> " PFX "-" PFX " %d\n",
+        pc, start_page, start_page + prot_size, (int)res);
+    if (res != 0) {
+        /* The memory may be sealed (mseal), or part of the range may not be mapped
+         * (our view of it is stale).  The kernel may have changed the protection up
+         * to the mapping it failed on: we undo that.
+         */
+        mprotect_syscall((void *)start_page, prot_size, prot | PROT_WRITE);
+        return false;
+    }
 
 #ifndef HAVE_MEMINFO_QUERY
     /* update all_memory_areas list with the protection change */
@@ -5362,6 +5369,7 @@ make_unwritable(byte *pc, size_t size)
                                false /*!exists*/);
     }
 #endif
+    return true;
 }
 
 /****************************************************************************/

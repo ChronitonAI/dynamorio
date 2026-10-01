@@ -6479,12 +6479,13 @@ make_copy_on_writable(byte *pc, size_t size)
 }
 
 /* requires that pc is page aligned and size is multiple of the page size
- * and marks that memory NOT writable, preserves other flags */
-void
+ * and marks that memory NOT writable, preserves other flags,
+ * returns false if the protection could not be changed */
+bool
 make_unwritable(byte *pc, size_t size)
 {
-    internal_change_protection(pc, size, false /*relative*/, false, false /*ignored*/, 0,
-                               NULL);
+    return internal_change_protection(pc, size, false /*relative*/, false,
+                                      false /*ignored*/, 0, NULL);
 }
 
 #endif /* !NOT_DYNAMORIO_CORE_PROPER: around most of file, to exclude preload */
