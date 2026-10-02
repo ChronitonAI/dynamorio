@@ -367,6 +367,9 @@ Further non-compatibility-affecting changes include:
    dr_get_fragment_variant(), and the new \p variant field of
    #dr_fault_fragment_info_t.  Traces are disabled when more than one variant is
    requested.  More than one variant is currently only supported on x86 Linux.
+ - Added dr_memory_is_pretend_writable(), which tells whether dr_query_memory()
+   would include #DR_MEMPROT_PRETEND_WRITE for an address without querying the
+   operating system.
 
 **************************************************
 <hr>
