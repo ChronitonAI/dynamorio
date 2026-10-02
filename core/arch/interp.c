@@ -2715,6 +2715,7 @@ client_process_bb(dcontext_t *dcontext, build_bb_t *bb)
     bool found_exit_cti = false;
     bool found_syscall = false;
     bool found_int = false;
+    bool found_float_pc_save = false;
 #ifdef ANNOTATIONS
     app_pc trailing_annotation_pc = NULL, instrumentation_pc = NULL;
     bool found_instrumentation_pc = false;
@@ -2905,6 +2906,9 @@ client_process_bb(dcontext_t *dcontext, build_bb_t *bb)
         /* ensure syscall/int2b terminates block */
         client_check_syscall(bb->ilist, inst, &found_syscall, &found_int);
 
+        if (instr_saves_float_pc(inst))
+            found_float_pc_save = true;
+
         if (instr_will_be_exit_cti(inst)) {
 
             if (!found_exit_cti) {
@@ -3006,6 +3010,13 @@ client_process_bb(dcontext_t *dcontext, build_bb_t *bb)
             }
         }
     }
+
+    /* bb_process_float_pc() gave a block ending in an FPU state save a special exit,
+     * which the reset of exit_type above dropped: without it, d_r_dispatch never
+     * translates the saved pc.
+     */
+    if (found_float_pc_save && !TESTANY(LINK_INDIRECT, bb->exit_type))
+        bb_process_float_pc(dcontext, bb);
 
     /* To handle the client modifying syscall numbers we cannot inline
      * syscalls in the middle of a bb.

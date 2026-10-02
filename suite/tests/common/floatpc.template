@@ -1,3 +1,13 @@
+FNSTENV intra is correctly handled
+#if defined(translate_fpu_pc) || defined(hotp_only)
+FNSTENV inter is correctly handled
+FNSAVE inter is correctly handled
+FNSTENV inter xdi is correctly handled
+#else
+FNSTENV inter is **incorrectly** handled
+FNSAVE inter is **incorrectly** handled
+FNSTENV inter xdi is **incorrectly** handled
+#endif
 #ifdef X64
 FXSAVE64 intra is correctly handled
 # if (defined(translate_fpu_pc) || defined(hotp_only)) && !defined(CPU_AMD)
@@ -5,17 +15,30 @@ FXSAVE64 inter is correctly handled
 # else
 FXSAVE64 inter is **incorrectly** handled
 # endif
-#else
-FNSTENV intra is correctly handled
-# if defined(translate_fpu_pc) || defined(hotp_only)
-FNSTENV inter is correctly handled
-# else
-FNSTENV inter is **incorrectly** handled
-# endif
 #endif
 FXSAVE intra is correctly handled
-# if (defined(translate_fpu_pc) || defined(hotp_only)) && !defined(CPU_AMD)
+#if (defined(translate_fpu_pc) || defined(hotp_only)) && !defined(CPU_AMD)
 FXSAVE inter is correctly handled
+FXSAVE inter xdi is correctly handled
+FXSAVE after SSE is correctly handled
+FXSAVE after FNSTCW is correctly handled
 #else
 FXSAVE inter is **incorrectly** handled
+FXSAVE inter xdi is **incorrectly** handled
+FXSAVE after SSE is **incorrectly** handled
+FXSAVE after FNSTCW is **incorrectly** handled
+#endif
+#ifndef CPU_AMD
+FXSAVE after FXRSTOR is correctly handled
+#else
+FXSAVE after FXRSTOR is **incorrectly** handled
+#endif
+#if (defined(translate_fpu_pc) || defined(hotp_only)) && !defined(CPU_AMD)
+XSAVE intra is correctly handled
+XSAVE inter is correctly handled
+XSAVE intra xdi is correctly handled
+#else
+XSAVE intra is **incorrectly** handled
+XSAVE inter is **incorrectly** handled
+XSAVE intra xdi is **incorrectly** handled
 #endif

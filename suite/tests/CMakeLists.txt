@@ -2559,6 +2559,9 @@ if (X86) # XXX i#1551, i#1569: port to ARM and AArch64
   endif (UNIX)
   tobuild_ci(client.syscall client-interface/syscall.c "" "-no_follow_children" "")
   tobuild_ci(client.count-bbs client-interface/count-bbs.c "" "" "")
+  # common.floatpc_xl8all with blocks a client instruments.
+  set(client.floatpc-xl8_client_source client-interface/floatpc-xl8.dll.c)
+  tobuild_ci(client.floatpc-xl8 common/floatpc.c "" "-translate_fpu_pc" "")
 endif (X86)
 if (X86 OR AARCH64)
   tobuild_ci(client.count-ctis client-interface/count-ctis.c "" "" "")

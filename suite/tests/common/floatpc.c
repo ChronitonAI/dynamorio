@@ -34,13 +34,21 @@
 #    include "tools.h" /* for print() */
 
 #    include <stdio.h>
+#    ifdef WINDOWS
+#        include <intrin.h>
+#    else
+#        include <cpuid.h>
+#    endif
 
-#    ifndef X64
 extern ptr_int_t
 test_fnstenv_intra(ptr_int_t *real_pc);
 extern ptr_int_t
 test_fnstenv_inter(ptr_int_t *real_pc);
-#    else
+extern ptr_int_t
+test_fnsave_inter(ptr_int_t *real_pc);
+extern ptr_int_t
+test_fnstenv_inter_xdi(ptr_int_t *real_pc);
+#    ifdef X64
 extern ptr_int_t
 test_fxsave64_intra(ptr_int_t *real_pc);
 extern ptr_int_t
@@ -50,24 +58,60 @@ extern ptr_int_t
 test_fxsave_intra(ptr_int_t *real_pc);
 extern ptr_int_t
 test_fxsave_inter(ptr_int_t *real_pc);
+extern ptr_int_t
+test_fxsave_inter_xdi(ptr_int_t *real_pc);
+extern ptr_int_t
+test_fxsave_after_sse(ptr_int_t *real_pc);
+extern ptr_int_t
+test_fxsave_after_fnstcw(ptr_int_t *real_pc);
+extern ptr_int_t
+test_fxsave_after_fxrstor(ptr_int_t *real_pc);
+extern ptr_int_t
+test_xsave_intra(ptr_int_t *real_pc);
+extern ptr_int_t
+test_xsave_inter(ptr_int_t *real_pc);
+extern ptr_int_t
+test_xsave_intra_xdi(ptr_int_t *real_pc);
+
+static bool
+has_xsave(void)
+{
+    int regs[4];
+#    ifdef WINDOWS
+    __cpuid(regs, 1);
+#    else
+    __cpuid(1, regs[0], regs[1], regs[2], regs[3]);
+#    endif
+    return (regs[2] & (1 << 27)) != 0; /* OSXSAVE */
+}
+
+/* The 32-bit formats hold the bottom 32 bits of the pc. */
+static void
+check32(const char *name, ptr_int_t (*test)(ptr_int_t *))
+{
+    ptr_int_t rpc, fpc;
+    fpc = test(&rpc);
+    if ((int)fpc == (int)rpc)
+        print("%s is correctly handled\n", name);
+    else
+        print("%s is **incorrectly** handled\n", name);
+}
 
 int
 main(void)
 {
     ptr_int_t rpc, fpc;
+    bool fxsave_inter_ok;
 
-#    ifndef X64
-    fpc = test_fnstenv_intra(&rpc);
-    if (fpc == rpc)
-        print("FNSTENV intra is correctly handled\n");
-    else
-        print("FNSTENV intra is **incorrectly** handled\n");
-    fpc = test_fnstenv_inter(&rpc);
-    if (fpc == rpc)
-        print("FNSTENV inter is correctly handled\n");
-    else
-        print("FNSTENV inter is **incorrectly** handled\n");
-#    else
+    check32("FNSTENV intra", test_fnstenv_intra);
+    check32("FNSTENV inter", test_fnstenv_inter);
+    check32("FNSAVE inter", test_fnsave_inter);
+    /* The save's operand uses xdi, which the code that passes the state's address to
+     * d_r_dispatch uses too.
+     */
+    check32("FNSTENV inter xdi", test_fnstenv_inter_xdi);
+
+#    ifdef X64
     fpc = test_fxsave64_intra(&rpc);
     if (fpc == rpc)
         print("FXSAVE64 intra is correctly handled\n");
@@ -87,10 +131,34 @@ main(void)
         print("FXSAVE intra is **incorrectly** handled\n");
 
     fpc = test_fxsave_inter(&rpc);
-    if ((int)fpc == (int)rpc)
+    fxsave_inter_ok = (int)fpc == (int)rpc;
+    if (fxsave_inter_ok)
         print("FXSAVE inter is correctly handled\n");
     else
         print("FXSAVE inter is **incorrectly** handled\n");
+    check32("FXSAVE inter xdi", test_fxsave_inter_xdi);
+
+    /* Only x87 instructions other than the control ones set the pc, and one that
+     * loads the state loads the pc.
+     */
+    check32("FXSAVE after SSE", test_fxsave_after_sse);
+    check32("FXSAVE after FNSTCW", test_fxsave_after_fnstcw);
+    check32("FXSAVE after FXRSTOR", test_fxsave_after_fxrstor);
+
+    /* XSAVE (of the x87 state alone) stores the pc as FXSAVE does; its pc is never
+     * updated inline, so intra-block too needs -translate_fpu_pc.  Without XSAVE, we
+     * report what FXSAVE inter found.
+     */
+    if (has_xsave()) {
+        check32("XSAVE intra", test_xsave_intra);
+        check32("XSAVE inter", test_xsave_inter);
+        check32("XSAVE intra xdi", test_xsave_intra_xdi);
+    } else {
+        const char *result = fxsave_inter_ok ? "correctly" : "**incorrectly**";
+        print("XSAVE intra is %s handled\n", result);
+        print("XSAVE inter is %s handled\n", result);
+        print("XSAVE intra xdi is %s handled\n", result);
+    }
 
     return 0;
 }
@@ -103,13 +171,13 @@ START_FILE
 # define FNSAVE_PC_OFFS  12
 # define FXSAVE_PC_OFFS   8
 
-# ifndef X64
-/* 32-bit only, as it will not save the top 32 bits and thus our test
- * could fail if the executable is loaded above the bottom 4GB.
+/* The 32-bit environment format holds the bottom 32 bits of the pc, which the
+ * test compares.
  */
 #  define FUNCNAME test_fnstenv_intra
         DECLARE_FUNC_SEH(FUNCNAME)
 GLOBAL_LABEL(FUNCNAME:)
+        END_PROLOG
         mov      REG_XAX, ARG1
         lea      REG_XDX, SYMREF(fldz_addr)
         mov      PTRSZ [REG_XAX], REG_XDX
@@ -126,6 +194,7 @@ ADDRTAKEN_LABEL(fldz_addr:)
 #  define FUNCNAME test_fnstenv_inter
         DECLARE_FUNC_SEH(FUNCNAME)
 GLOBAL_LABEL(FUNCNAME:)
+        END_PROLOG
         mov      REG_XAX, ARG1
         lea      REG_XDX, SYMREF(fldz_addr1)
         mov      PTRSZ [REG_XAX], REG_XDX
@@ -144,16 +213,64 @@ skip:
         END_FUNC(FUNCNAME)
 #  undef FUNCNAME
 
-# else
+#  define FUNCNAME test_fnsave_inter
+        DECLARE_FUNC_SEH(FUNCNAME)
+GLOBAL_LABEL(FUNCNAME:)
+        END_PROLOG
+        fninit
+        mov      REG_XAX, ARG1
+        lea      REG_XDX, SYMREF(fldz_addr4)
+        mov      PTRSZ [REG_XAX], REG_XDX
+ADDRTAKEN_LABEL(fldz_addr4:)
+        fldz
+        /* conditional to put fldz in prior bb */
+        mov      eax, 1
+        cmp      eax, 1
+        jne      skip2
+        sub      REG_XSP, 112 /* make space for fnsave */
+        fnsave   [REG_XSP]
+        mov      eax, DWORD [REG_XSP + FNSAVE_PC_OFFS] /* PC field is 32 bits */
+        add      REG_XSP, 112
+skip2:
+        ret
+        END_FUNC(FUNCNAME)
+#  undef FUNCNAME
+
+#  define FUNCNAME test_fnstenv_inter_xdi
+        DECLARE_FUNC_SEH(FUNCNAME)
+GLOBAL_LABEL(FUNCNAME:)
+        mov      REG_XAX, ARG1
+        PUSH_SEH(REG_XDI)
+        END_PROLOG
+        lea      REG_XDX, SYMREF(fldz_addr11)
+        mov      PTRSZ [REG_XAX], REG_XDX
+ADDRTAKEN_LABEL(fldz_addr11:)
+        fldz
+        /* conditional to put fldz in prior bb */
+        mov      eax, 1
+        cmp      eax, 1
+        jne      skip7
+        sub      REG_XSP, 32 /* make space for fnstenv */
+        mov      REG_XDI, REG_XSP
+        fnstenv  [REG_XDI]
+        mov      eax, DWORD [REG_XDI + FNSAVE_PC_OFFS] /* PC field is 32 bits */
+        add      REG_XSP, 32
+skip7:
+        pop      REG_XDI
+        ret
+        END_FUNC(FUNCNAME)
+#  undef FUNCNAME
+
+# ifdef X64
 
 #  define FUNCNAME test_fxsave64_intra
         DECLARE_FUNC_SEH(FUNCNAME)
 GLOBAL_LABEL(FUNCNAME:)
         END_PROLOG
         mov      REG_XAX, ARG1
-        lea      REG_XDX, SYMREF(fldz_addr)
+        lea      REG_XDX, SYMREF(fldz_addr64)
         mov      PTRSZ [REG_XAX], REG_XDX
-ADDRTAKEN_LABEL(fldz_addr:)
+ADDRTAKEN_LABEL(fldz_addr64:)
         fldz
         mov      REG_XDX, REG_XSP
         sub      REG_XSP, 512+16 /* make space for fxsave + align */
@@ -171,14 +288,14 @@ ADDRTAKEN_LABEL(fldz_addr:)
 GLOBAL_LABEL(FUNCNAME:)
         END_PROLOG
         mov      REG_XAX, ARG1
-        lea      REG_XDX, SYMREF(fldz_addr1)
+        lea      REG_XDX, SYMREF(fldz_addr65)
         mov      PTRSZ [REG_XAX], REG_XDX
-ADDRTAKEN_LABEL(fldz_addr1:)
+ADDRTAKEN_LABEL(fldz_addr65:)
         fldz
         /* conditional to put fldz in prior bb */
         mov      eax, 1
         cmp      eax, 1
-        jne      skip
+        jne      skip64
         mov      REG_XDX, REG_XSP
         sub      REG_XSP, 512+16 /* make space for fxsave + align */
         and      REG_XSP, -16    /* align to 16 */
@@ -186,7 +303,7 @@ ADDRTAKEN_LABEL(fldz_addr1:)
         RAW(48) RAW(0f) RAW(ae) RAW(04) RAW(24) /* fxsave64 [REG_XSP] */
         mov      REG_XAX, PTRSZ [REG_XSP + FXSAVE_PC_OFFS]
         mov      REG_XSP, REG_XDX
-skip:
+skip64:
         ret
         END_FUNC(FUNCNAME)
 #  undef FUNCNAME
@@ -231,6 +348,198 @@ ADDRTAKEN_LABEL(fldz_addr3:)
         mov      eax, DWORD [REG_XSP + FXSAVE_PC_OFFS]
         mov      REG_XSP, REG_XDX
 skip1:
+        ret
+        END_FUNC(FUNCNAME)
+# undef FUNCNAME
+
+# define FUNCNAME test_fxsave_inter_xdi
+        DECLARE_FUNC_SEH(FUNCNAME)
+GLOBAL_LABEL(FUNCNAME:)
+        mov      REG_XAX, ARG1
+        PUSH_SEH(REG_XDI)
+        END_PROLOG
+        lea      REG_XDX, SYMREF(fldz_addr13)
+        mov      PTRSZ [REG_XAX], REG_XDX
+ADDRTAKEN_LABEL(fldz_addr13:)
+        fldz
+        /* conditional to put fldz in prior bb */
+        mov      eax, 1
+        cmp      eax, 1
+        jne      skip8
+        mov      REG_XDX, REG_XSP
+        sub      REG_XSP, 512+16 /* make space for fxsave + align */
+        and      REG_XSP, -16    /* align to 16 */
+        mov      REG_XDI, REG_XSP
+        fxsave   [REG_XDI]
+        mov      eax, DWORD [REG_XDI + FXSAVE_PC_OFFS]
+        mov      REG_XSP, REG_XDX
+skip8:
+        pop      REG_XDI
+        ret
+        END_FUNC(FUNCNAME)
+# undef FUNCNAME
+
+/* An SSE instruction does not set the pc. */
+# define FUNCNAME test_fxsave_after_sse
+        DECLARE_FUNC_SEH(FUNCNAME)
+GLOBAL_LABEL(FUNCNAME:)
+        END_PROLOG
+        fninit
+        mov      REG_XAX, ARG1
+        lea      REG_XDX, SYMREF(fldz_addr7)
+        mov      PTRSZ [REG_XAX], REG_XDX
+ADDRTAKEN_LABEL(fldz_addr7:)
+        fldz
+        /* conditional to put fldz in prior bb */
+        mov      eax, 1
+        cmp      eax, 1
+        jne      skip3
+        addps    xmm0, xmm0
+        mov      REG_XDX, REG_XSP
+        sub      REG_XSP, 512+16 /* make space for fxsave + align */
+        and      REG_XSP, -16    /* align to 16 */
+        fxsave   [REG_XSP]
+        mov      eax, DWORD [REG_XSP + FXSAVE_PC_OFFS]
+        mov      REG_XSP, REG_XDX
+skip3:
+        ret
+        END_FUNC(FUNCNAME)
+# undef FUNCNAME
+
+/* Nor does an x87 control instruction. */
+# define FUNCNAME test_fxsave_after_fnstcw
+        DECLARE_FUNC_SEH(FUNCNAME)
+GLOBAL_LABEL(FUNCNAME:)
+        END_PROLOG
+        fninit
+        mov      REG_XAX, ARG1
+        lea      REG_XDX, SYMREF(fldz_addr8)
+        mov      PTRSZ [REG_XAX], REG_XDX
+ADDRTAKEN_LABEL(fldz_addr8:)
+        fldz
+        /* conditional to put fldz in prior bb */
+        mov      eax, 1
+        cmp      eax, 1
+        jne      skip5
+        mov      REG_XDX, REG_XSP
+        sub      REG_XSP, 512+16 /* make space for fxsave + align */
+        and      REG_XSP, -16    /* align to 16 */
+        fnstcw   WORD [REG_XSP]
+        fxsave   [REG_XSP]
+        mov      eax, DWORD [REG_XSP + FXSAVE_PC_OFFS]
+        mov      REG_XSP, REG_XDX
+skip5:
+        ret
+        END_FUNC(FUNCNAME)
+# undef FUNCNAME
+
+/* FXRSTOR loads the pc, from an image whose pc is real_pc's address. */
+# define FUNCNAME test_fxsave_after_fxrstor
+        DECLARE_FUNC_SEH(FUNCNAME)
+GLOBAL_LABEL(FUNCNAME:)
+        END_PROLOG
+        fninit
+        mov      REG_XAX, ARG1
+        mov      PTRSZ [REG_XAX], REG_XAX
+        mov      REG_XDX, REG_XSP
+        sub      REG_XSP, 1024+16 /* make space for two fxsaves + align */
+        and      REG_XSP, -16     /* align to 16 */
+        fldz
+        fxsave   [REG_XSP + 512]
+        mov      DWORD [REG_XSP + 512 + FXSAVE_PC_OFFS], eax
+        fxrstor  [REG_XSP + 512]
+        fxsave   [REG_XSP]
+        mov      eax, DWORD [REG_XSP + FXSAVE_PC_OFFS]
+        mov      REG_XSP, REG_XDX
+        ret
+        END_FUNC(FUNCNAME)
+# undef FUNCNAME
+
+/* XSAVE of the x87 state alone: 576 bytes, aligned to 64.  We return the bottom 32
+ * bits of the pc, which is all that the IA-32 format holds.
+ */
+# ifdef X64
+/* VS2005 doesn't know "xsave64" */
+#  define XSAVE_XSP RAW(48) RAW(0f) RAW(ae) RAW(24) RAW(24) /* xsave64 [REG_XSP] */
+# else
+#  define XSAVE_XSP RAW(0f) RAW(ae) RAW(24) RAW(24) /* xsave [REG_XSP] */
+# endif
+# ifdef X64
+#  define XSAVE_XDI RAW(48) RAW(0f) RAW(ae) RAW(27) /* xsave64 [REG_XDI] */
+# else
+#  define XSAVE_XDI RAW(0f) RAW(ae) RAW(27) /* xsave [REG_XDI] */
+# endif
+
+# define FUNCNAME test_xsave_intra
+        DECLARE_FUNC_SEH(FUNCNAME)
+GLOBAL_LABEL(FUNCNAME:)
+        END_PROLOG
+        fninit
+        mov      REG_XAX, ARG1
+        lea      REG_XDX, SYMREF(fldz_addr9)
+        mov      PTRSZ [REG_XAX], REG_XDX
+        mov      REG_XCX, REG_XSP
+ADDRTAKEN_LABEL(fldz_addr9:)
+        fldz
+        sub      REG_XSP, 576+64 /* make space for xsave + align */
+        and      REG_XSP, -64    /* align to 64 */
+        mov      eax, 1          /* the x87 state */
+        xor      edx, edx
+        XSAVE_XSP
+        mov      eax, DWORD [REG_XSP + FXSAVE_PC_OFFS]
+        mov      REG_XSP, REG_XCX
+        ret
+        END_FUNC(FUNCNAME)
+# undef FUNCNAME
+
+# define FUNCNAME test_xsave_inter
+        DECLARE_FUNC_SEH(FUNCNAME)
+GLOBAL_LABEL(FUNCNAME:)
+        END_PROLOG
+        fninit
+        mov      REG_XAX, ARG1
+        lea      REG_XDX, SYMREF(fldz_addr10)
+        mov      PTRSZ [REG_XAX], REG_XDX
+        mov      REG_XCX, REG_XSP
+ADDRTAKEN_LABEL(fldz_addr10:)
+        fldz
+        /* conditional to put fldz in prior bb */
+        mov      eax, 1
+        cmp      eax, 1
+        jne      skip6
+        sub      REG_XSP, 576+64 /* make space for xsave + align */
+        and      REG_XSP, -64    /* align to 64 */
+        mov      eax, 1          /* the x87 state */
+        xor      edx, edx
+        XSAVE_XSP
+        mov      eax, DWORD [REG_XSP + FXSAVE_PC_OFFS]
+        mov      REG_XSP, REG_XCX
+skip6:
+        ret
+        END_FUNC(FUNCNAME)
+# undef FUNCNAME
+
+# define FUNCNAME test_xsave_intra_xdi
+        DECLARE_FUNC_SEH(FUNCNAME)
+GLOBAL_LABEL(FUNCNAME:)
+        mov      REG_XAX, ARG1
+        PUSH_SEH(REG_XDI)
+        END_PROLOG
+        fninit
+        lea      REG_XDX, SYMREF(fldz_addr12)
+        mov      PTRSZ [REG_XAX], REG_XDX
+        mov      REG_XCX, REG_XSP
+ADDRTAKEN_LABEL(fldz_addr12:)
+        fldz
+        sub      REG_XSP, 576+64 /* make space for xsave + align */
+        and      REG_XSP, -64    /* align to 64 */
+        mov      REG_XDI, REG_XSP
+        mov      eax, 1          /* the x87 state */
+        xor      edx, edx
+        XSAVE_XDI
+        mov      eax, DWORD [REG_XDI + FXSAVE_PC_OFFS]
+        mov      REG_XSP, REG_XCX
+        pop      REG_XDI
         ret
         END_FUNC(FUNCNAME)
 # undef FUNCNAME
