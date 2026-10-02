@@ -46,6 +46,8 @@ extern ptr_int_t
 test_fnstenv_inter(ptr_int_t *real_pc);
 extern ptr_int_t
 test_fnsave_inter(ptr_int_t *real_pc);
+extern ptr_int_t
+test_fnstenv_inter_xdi(ptr_int_t *real_pc);
 #    ifdef X64
 extern ptr_int_t
 test_fxsave64_intra(ptr_int_t *real_pc);
@@ -57,6 +59,8 @@ test_fxsave_intra(ptr_int_t *real_pc);
 extern ptr_int_t
 test_fxsave_inter(ptr_int_t *real_pc);
 extern ptr_int_t
+test_fxsave_inter_xdi(ptr_int_t *real_pc);
+extern ptr_int_t
 test_fxsave_after_sse(ptr_int_t *real_pc);
 extern ptr_int_t
 test_fxsave_after_fnstcw(ptr_int_t *real_pc);
@@ -66,6 +70,8 @@ extern ptr_int_t
 test_xsave_intra(ptr_int_t *real_pc);
 extern ptr_int_t
 test_xsave_inter(ptr_int_t *real_pc);
+extern ptr_int_t
+test_xsave_intra_xdi(ptr_int_t *real_pc);
 
 static bool
 has_xsave(void)
@@ -100,6 +106,10 @@ main(void)
     check32("FNSTENV intra", test_fnstenv_intra);
     check32("FNSTENV inter", test_fnstenv_inter);
     check32("FNSAVE inter", test_fnsave_inter);
+    /* The save's operand uses xdi, which the code that passes the state's address to
+     * d_r_dispatch uses too.
+     */
+    check32("FNSTENV inter xdi", test_fnstenv_inter_xdi);
 
 #    ifdef X64
     fpc = test_fxsave64_intra(&rpc);
@@ -126,6 +136,7 @@ main(void)
         print("FXSAVE inter is correctly handled\n");
     else
         print("FXSAVE inter is **incorrectly** handled\n");
+    check32("FXSAVE inter xdi", test_fxsave_inter_xdi);
 
     /* Only x87 instructions other than the control ones set the pc, and one that
      * loads the state loads the pc.
@@ -141,10 +152,12 @@ main(void)
     if (has_xsave()) {
         check32("XSAVE intra", test_xsave_intra);
         check32("XSAVE inter", test_xsave_inter);
+        check32("XSAVE intra xdi", test_xsave_intra_xdi);
     } else {
         const char *result = fxsave_inter_ok ? "correctly" : "**incorrectly**";
         print("XSAVE intra is %s handled\n", result);
         print("XSAVE inter is %s handled\n", result);
+        print("XSAVE intra xdi is %s handled\n", result);
     }
 
     return 0;
@@ -219,6 +232,31 @@ ADDRTAKEN_LABEL(fldz_addr4:)
         mov      eax, DWORD [REG_XSP + FNSAVE_PC_OFFS] /* PC field is 32 bits */
         add      REG_XSP, 112
 skip2:
+        ret
+        END_FUNC(FUNCNAME)
+#  undef FUNCNAME
+
+#  define FUNCNAME test_fnstenv_inter_xdi
+        DECLARE_FUNC_SEH(FUNCNAME)
+GLOBAL_LABEL(FUNCNAME:)
+        mov      REG_XAX, ARG1
+        PUSH_SEH(REG_XDI)
+        END_PROLOG
+        lea      REG_XDX, SYMREF(fldz_addr11)
+        mov      PTRSZ [REG_XAX], REG_XDX
+ADDRTAKEN_LABEL(fldz_addr11:)
+        fldz
+        /* conditional to put fldz in prior bb */
+        mov      eax, 1
+        cmp      eax, 1
+        jne      skip7
+        sub      REG_XSP, 32 /* make space for fnstenv */
+        mov      REG_XDI, REG_XSP
+        fnstenv  [REG_XDI]
+        mov      eax, DWORD [REG_XDI + FNSAVE_PC_OFFS] /* PC field is 32 bits */
+        add      REG_XSP, 32
+skip7:
+        pop      REG_XDI
         ret
         END_FUNC(FUNCNAME)
 #  undef FUNCNAME
@@ -314,6 +352,33 @@ skip1:
         END_FUNC(FUNCNAME)
 # undef FUNCNAME
 
+# define FUNCNAME test_fxsave_inter_xdi
+        DECLARE_FUNC_SEH(FUNCNAME)
+GLOBAL_LABEL(FUNCNAME:)
+        mov      REG_XAX, ARG1
+        PUSH_SEH(REG_XDI)
+        END_PROLOG
+        lea      REG_XDX, SYMREF(fldz_addr13)
+        mov      PTRSZ [REG_XAX], REG_XDX
+ADDRTAKEN_LABEL(fldz_addr13:)
+        fldz
+        /* conditional to put fldz in prior bb */
+        mov      eax, 1
+        cmp      eax, 1
+        jne      skip8
+        mov      REG_XDX, REG_XSP
+        sub      REG_XSP, 512+16 /* make space for fxsave + align */
+        and      REG_XSP, -16    /* align to 16 */
+        mov      REG_XDI, REG_XSP
+        fxsave   [REG_XDI]
+        mov      eax, DWORD [REG_XDI + FXSAVE_PC_OFFS]
+        mov      REG_XSP, REG_XDX
+skip8:
+        pop      REG_XDI
+        ret
+        END_FUNC(FUNCNAME)
+# undef FUNCNAME
+
 /* An SSE instruction does not set the pc. */
 # define FUNCNAME test_fxsave_after_sse
         DECLARE_FUNC_SEH(FUNCNAME)
@@ -399,6 +464,11 @@ GLOBAL_LABEL(FUNCNAME:)
 # else
 #  define XSAVE_XSP RAW(0f) RAW(ae) RAW(24) RAW(24) /* xsave [REG_XSP] */
 # endif
+# ifdef X64
+#  define XSAVE_XDI RAW(48) RAW(0f) RAW(ae) RAW(27) /* xsave64 [REG_XDI] */
+# else
+#  define XSAVE_XDI RAW(0f) RAW(ae) RAW(27) /* xsave [REG_XDI] */
+# endif
 
 # define FUNCNAME test_xsave_intra
         DECLARE_FUNC_SEH(FUNCNAME)
@@ -445,6 +515,31 @@ ADDRTAKEN_LABEL(fldz_addr10:)
         mov      eax, DWORD [REG_XSP + FXSAVE_PC_OFFS]
         mov      REG_XSP, REG_XCX
 skip6:
+        ret
+        END_FUNC(FUNCNAME)
+# undef FUNCNAME
+
+# define FUNCNAME test_xsave_intra_xdi
+        DECLARE_FUNC_SEH(FUNCNAME)
+GLOBAL_LABEL(FUNCNAME:)
+        mov      REG_XAX, ARG1
+        PUSH_SEH(REG_XDI)
+        END_PROLOG
+        fninit
+        lea      REG_XDX, SYMREF(fldz_addr12)
+        mov      PTRSZ [REG_XAX], REG_XDX
+        mov      REG_XCX, REG_XSP
+ADDRTAKEN_LABEL(fldz_addr12:)
+        fldz
+        sub      REG_XSP, 576+64 /* make space for xsave + align */
+        and      REG_XSP, -64    /* align to 64 */
+        mov      REG_XDI, REG_XSP
+        mov      eax, 1          /* the x87 state */
+        xor      edx, edx
+        XSAVE_XDI
+        mov      eax, DWORD [REG_XDI + FXSAVE_PC_OFFS]
+        mov      REG_XSP, REG_XCX
+        pop      REG_XDI
         ret
         END_FUNC(FUNCNAME)
 # undef FUNCNAME

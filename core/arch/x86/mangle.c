@@ -2442,24 +2442,12 @@ mangle_float_pc(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
         case OP_xsaveopt64: reason = EXIT_REASON_FLOAT_PC_XSAVE64; break;
         default: ASSERT_NOT_REACHED();
         }
-        if (DYNAMO_OPTION(private_ib_in_tls) || TESTANY(FRAG_SHARED, *flags)) {
-            insert_shared_get_dcontext(dcontext, ilist, instr, true /*save_xdi*/);
-            PRE(ilist, instr,
-                INSTR_CREATE_mov_st(
-                    dcontext,
-                    opnd_create_dcontext_field_via_reg_sz(dcontext, REG_NULL /*default*/,
-                                                          EXIT_REASON_OFFSET, OPSZ_2),
-                    OPND_CREATE_INT16(reason)));
-        } else {
-            PRE(ilist, instr,
-                instr_create_save_immed16_to_dcontext(dcontext, reason,
-                                                      EXIT_REASON_OFFSET));
-            PRE(ilist, instr,
-                instr_create_save_to_tls(dcontext, REG_XDI, DCONTEXT_BASE_SPILL_SLOT));
-        }
+        PRE(ilist, instr,
+            instr_create_save_to_tls(dcontext, REG_XDI, DCONTEXT_BASE_SPILL_SLOT));
         /* At this point, xdi is spilled into DCONTEXT_BASE_SPILL_SLOT */
 
         /* We pass the address in the xbx tls slot, which is untouched by fcache_return.
+         * We compute it before xdi holds the dcontext: the save's operand may use xdi.
          *
          * XXX: handle far refs!  Xref drutil_insert_get_mem_addr(), and sandbox_write()
          * hitting this same issue.
@@ -2478,6 +2466,20 @@ mangle_float_pc(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
         PRE(ilist, instr,
             instr_create_save_to_tls(dcontext, REG_XDI, FLOAT_PC_STATE_SLOT));
 
+        if (DYNAMO_OPTION(private_ib_in_tls) || TESTANY(FRAG_SHARED, *flags)) {
+            insert_shared_get_dcontext(dcontext, ilist, instr, false /*save_xdi*/);
+            PRE(ilist, instr,
+                INSTR_CREATE_mov_st(
+                    dcontext,
+                    opnd_create_dcontext_field_via_reg_sz(dcontext, REG_NULL /*default*/,
+                                                          EXIT_REASON_OFFSET, OPSZ_2),
+                    OPND_CREATE_INT16(reason)));
+        } else {
+            PRE(ilist, instr,
+                instr_create_save_immed16_to_dcontext(dcontext, reason,
+                                                      EXIT_REASON_OFFSET));
+        }
+
         /* Restore app %xdi */
         if (TESTANY(FRAG_SHARED, *flags))
             insert_shared_restore_dcontext_reg(dcontext, ilist, instr);
@@ -2493,7 +2495,9 @@ mangle_float_pc(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
         while (exit_jmp != NULL && !instr_is_exit_cti(exit_jmp))
             exit_jmp = instr_get_next(exit_jmp);
         ASSERT(exit_jmp != NULL);
-        ASSERT(instr_branch_special_exit(exit_jmp));
+        /* Unless a copy of this save earlier in the block (a client can copy the
+         * block's instructions, as drbbdup does) cleared it already.
+         */
         instr_branch_set_special_exit(exit_jmp, false);
         /* XXX: there could be some other reason this was marked
          * cannot-be-trace that we're undoing here...
