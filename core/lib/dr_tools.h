@@ -2811,6 +2811,34 @@ dr_app_pc_from_cache_pc(byte *cache_pc);
 
 DR_API
 /**
+ * Requests that DR check, each time the application executes code from the pages
+ * of [\p start, \p start + \p size), that the code is unchanged since DR built the
+ * code cache fragment that runs it, as DR does for self-modifying code it cannot
+ * write-protect (see -sandbox_writable), or, with \p sandbox false, stops doing so
+ * for the range.  DR detects changes to the application's code with page protection
+ * where it can: it makes writable memory with code read-only, and treats code in
+ * read-only memory as unchanged until the application changes the memory's mappings
+ * or protection.  Neither works for memory whose contents can change without a write
+ * to the range that DR sees: e.g., code written through a second, writable mapping
+ * of the same memory at another address (a "dual-mapped" JIT code cache), or memory
+ * shared with another process that writes to it.  A client that knows of such memory
+ * can have DR sandbox it.  Sandboxed code costs a comparison of each block's code
+ * whenever the block is entered.  The request persists until it is withdrawn, also
+ * when the range is unmapped and other memory is mapped there.
+ *
+ * DR throws away the code cache fragments built from the range (as dr_flush_region()
+ * does), so the restrictions of dr_flush_region() apply: this routine may only be
+ * called from a clean call from the code cache, from a nudge, or from the pre- and
+ * post-system-call events, with no locks held; from a clean call, the caller must use
+ * dr_redirect_execution() to return to the application.
+ *
+ * \return false if \p size is 0 or the range overlaps DR's own memory.
+ */
+bool
+dr_sandbox_app_memory(app_pc start, size_t size, bool sandbox);
+
+DR_API
+/**
  * Intended to be called between dr_app_setup() and dr_app_start() to
  * pre-create code cache fragments for each basic block address in the
  * \p tags array.  This speeds up the subsequent attach when

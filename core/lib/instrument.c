@@ -7536,6 +7536,34 @@ dr_delay_flush_region_ex(app_pc start, size_t size, dr_flush_flags_t flags, uint
 }
 
 DR_API
+bool
+dr_sandbox_app_memory(app_pc start, size_t size, bool sandbox)
+{
+    dcontext_t *dcontext = get_thread_private_dcontext();
+    app_pc end;
+    CLIENT_ASSERT(!standalone_library, "API not supported in standalone mode");
+    ASSERT(dcontext != NULL);
+    LOG(THREAD, LOG_FRAGMENT, 2, "%s: " PFX "-" PFX " %d\n", __FUNCTION__, start,
+        start + size, sandbox);
+    /* The restrictions of dr_flush_region(), which we flush like. */
+    CLIENT_ASSERT(!is_couldbelinking(dcontext),
+                  "dr_sandbox_app_memory: called from an event callback that doesn't "
+                  "support calling this routine; see header file for restrictions.");
+    CLIENT_ASSERT(OWN_NO_LOCKS(dcontext),
+                  "dr_sandbox_app_memory: caller owns a client lock or was called from "
+                  "an event callback that doesn't support calling this routine; see "
+                  "header file for restrictions.");
+    if (size == 0 || is_couldbelinking(dcontext) || start + size < start)
+        return false;
+    end = (app_pc)ALIGN_FORWARD(start + size, PAGE_SIZE);
+    start = (app_pc)ALIGN_BACKWARD(start, PAGE_SIZE);
+    if (end == NULL || dynamo_vm_area_overlap(start, end))
+        return false;
+    vm_area_sandbox_app_memory(dcontext, start, end, sandbox);
+    return true;
+}
+
+DR_API
 /* returns whether or not there is a fragment in the drcontext fcache at tag
  */
 bool

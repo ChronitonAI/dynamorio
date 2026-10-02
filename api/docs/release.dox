@@ -370,6 +370,9 @@ Further non-compatibility-affecting changes include:
  - Added dr_memory_is_pretend_writable(), which tells whether dr_query_memory()
    would include #DR_MEMPROT_PRETEND_WRITE for an address without querying the
    operating system.
+ - Added dr_sandbox_app_memory(), which has DR check code that can change without a
+   write it sees (e.g., code written through a second mapping of the same memory)
+   each time it executes it.
 
 **************************************************
 <hr>
