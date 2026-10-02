@@ -5340,8 +5340,10 @@ recreate_bb_ilist(dcontext_t *dcontext, byte *pc, byte *pretend_pc, app_pc stop_
 {
     build_bb_t bb;
 
-    /* don't know full range -- just do simple check now */
-    if (!is_readable_without_exception(pc, 4)) {
+    /* We don't know the full range: just check the first byte now.  The block can be
+     * a single instruction shorter than 4 bytes at the end of readable memory.
+     */
+    if (!is_readable_without_exception(pc, 1)) {
         LOG(THREAD, LOG_INTERP, 3, "recreate_bb_ilist: cannot read memory at " PFX "\n",
             pc);
         return NULL;

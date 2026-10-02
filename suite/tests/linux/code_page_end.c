@@ -35,8 +35,9 @@
  * execute without any fault (the decoder must not read past them), and instructions
  * that extend past it or execution that falls off its end, which must fault where they
  * do natively: at the start of the instruction that cannot be fetched, with the
- * instructions before it executed.  Each case runs twice, the second time from the
- * code cache.
+ * instructions before it executed.  The faults of a breakpoint and of an invalid opcode
+ * at the end of the page need the translation of a block that starts there.  Each case
+ * runs twice, the second time from the code cache.
  */
 
 #include <setjmp.h>
@@ -73,16 +74,22 @@ static const code_case_t cases[] = {
     { "inc-partial", { 0xff, 0xc0, 0xb8, 0x01, 0x00 }, 5, 0 },
     /* inc eax; mov r32, r/m32 without its ModRM byte */
     { "inc-no-modrm", { 0xff, 0xc0, 0x8b }, 3, 0 },
+    /* int3 */
+    { "int3", { 0xcc }, 1, 0 },
+    /* ud2 */
+    { "ud2", { 0x0f, 0x0b }, 2, 0 },
 };
 
 static SIGJMP_BUF mark;
 static unsigned char *page_end;
 static uintptr_t fault_pc, fault_addr, fault_eax;
+static int fault_sig;
 
 static void
-handle_segv(int sig, siginfo_t *info, ucontext_t *ucxt)
+handle_signal(int sig, siginfo_t *info, ucontext_t *ucxt)
 {
     sigcontext_t *sc = SIGCXT_FROM_UCXT(ucxt);
+    fault_sig = sig;
     fault_pc = (uintptr_t)sc->SC_XIP;
     fault_addr = (uintptr_t)info->si_addr;
     fault_eax = (uintptr_t)sc->SC_XAX;
@@ -97,17 +104,23 @@ run(const code_case_t *c, const char *next_page)
         unsigned char *entry = page_end - c->len + c->entry;
         __asm__ __volatile__("call *%1" : "+a"(eax) : "r"(entry) : "memory");
         print("%s, %s: returned %ld\n", c->name, next_page, eax);
-    } else {
+    } else if (fault_sig == SIGSEGV) {
         print("%s, %s: SIGSEGV at end%+ld, address end%+ld, eax %ld\n", c->name,
               next_page, (long)(fault_pc - (uintptr_t)page_end),
               (long)(fault_addr - (uintptr_t)page_end), (long)(int)fault_eax);
+    } else {
+        print("%s, %s: %s at end%+ld, eax %ld\n", c->name, next_page,
+              fault_sig == SIGTRAP ? "SIGTRAP" : "SIGILL",
+              (long)(fault_pc - (uintptr_t)page_end), (long)(int)fault_eax);
     }
 }
 
 int
 main(int argc, char **argv)
 {
-    intercept_signal(SIGSEGV, (handler_3_t)handle_segv, false);
+    intercept_signal(SIGSEGV, (handler_3_t)handle_signal, false);
+    intercept_signal(SIGTRAP, (handler_3_t)handle_signal, false);
+    intercept_signal(SIGILL, (handler_3_t)handle_signal, false);
     for (int inaccessible = 0; inaccessible < 2; inaccessible++) {
         const char *next_page = inaccessible ? "inaccessible" : "unmapped";
         for (int i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
