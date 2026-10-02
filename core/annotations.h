@@ -162,7 +162,11 @@ static inline bool
 is_annotation_jump_over_dead_code(instr_t *instr)
 {
     app_pc xl8 = instr_get_translation(instr);
-    return xl8 != NULL && *(ushort *)xl8 == ANNOTATION_JUMP_OVER_LABEL_REFERENCE;
+    /* We read the second byte only after the first one, eb, says that the instruction
+     * is a 2-byte jump: the bytes after a shorter instruction need not be readable.
+     */
+    return xl8 != NULL && *xl8 == (byte)ANNOTATION_JUMP_OVER_LABEL_REFERENCE &&
+        *(ushort *)xl8 == ANNOTATION_JUMP_OVER_LABEL_REFERENCE;
 }
 #    endif
 
@@ -174,13 +178,17 @@ is_decoded_valgrind_annotation_tail(instr_t *instr)
 
 #    ifdef X64
 #        ifndef WINDOWS
-/* Return true if instr_start_pc could be the last instruction of a Valgrind annotation,
- * or false if it definitely is not a Valgrind annotation.
+/* Return true if the instruction [instr_start_pc, instr_end_pc) could be the last
+ * instruction of a Valgrind annotation, or false if it definitely is not a Valgrind
+ * annotation.  Reads only the bytes of the instruction: the bytes after it need not be
+ * readable.
  */
 static inline bool
-is_encoded_valgrind_annotation_tail(app_pc instr_start_pc)
+is_encoded_valgrind_annotation_tail(app_pc instr_start_pc, app_pc instr_end_pc)
 {
-    return (((*(uint *)instr_start_pc) & 0xffffff) == ENCODED_VALGRIND_ANNOTATION_TAIL);
+    return instr_end_pc == instr_start_pc + 3 &&
+        (*(ushort *)instr_start_pc | ((uint)instr_start_pc[2] << 16)) ==
+        ENCODED_VALGRIND_ANNOTATION_TAIL;
 }
 
 /* Return true if xchg_start_pc is definitely the last instruction of a Valgrind
@@ -211,13 +219,16 @@ is_encoded_valgrind_annotation(app_pc xchg_start_pc, app_pc bb_start, app_pc pag
 }
 #        endif
 #    else
-/* Return true if instr_start_pc could be the last instruction of a Valgrind annotation,
- * or false if it definitely is not a Valgrind annotation.
+/* Return true if the instruction [instr_start_pc, instr_end_pc) could be the last
+ * instruction of a Valgrind annotation, or false if it definitely is not a Valgrind
+ * annotation.  Reads only the bytes of the instruction: the bytes after it need not be
+ * readable.
  */
 static inline bool
-is_encoded_valgrind_annotation_tail(app_pc instr_start_pc)
+is_encoded_valgrind_annotation_tail(app_pc instr_start_pc, app_pc instr_end_pc)
 {
-    return (*(ushort *)instr_start_pc == ENCODED_VALGRIND_ANNOTATION_TAIL);
+    return instr_end_pc == instr_start_pc + 2 &&
+        *(ushort *)instr_start_pc == ENCODED_VALGRIND_ANNOTATION_TAIL;
 }
 
 /* Return true if xchg_start_pc is definitely the last instruction of a Valgrind

@@ -1,0 +1,41 @@
+ret, unmapped: returned 5
+ret, unmapped: returned 5
+ret-imm, unmapped: returned 5
+ret-imm, unmapped: returned 5
+mov-ret, unmapped: returned 7
+mov-ret, unmapped: returned 7
+jmp-back, unmapped: returned 5
+jmp-back, unmapped: returned 5
+fall-off, unmapped: SIGSEGV at end+0, address end+0, eax 6
+fall-off, unmapped: SIGSEGV at end+0, address end+0, eax 6
+partial, unmapped: SIGSEGV at end-3, address end+0, eax 5
+partial, unmapped: SIGSEGV at end-3, address end+0, eax 5
+inc-partial, unmapped: SIGSEGV at end-3, address end+0, eax 6
+inc-partial, unmapped: SIGSEGV at end-3, address end+0, eax 6
+inc-no-modrm, unmapped: SIGSEGV at end-1, address end+0, eax 6
+inc-no-modrm, unmapped: SIGSEGV at end-1, address end+0, eax 6
+int3, unmapped: SIGTRAP at end+0, eax 5
+int3, unmapped: SIGTRAP at end+0, eax 5
+ud2, unmapped: SIGILL at end-2, eax 5
+ud2, unmapped: SIGILL at end-2, eax 5
+ret, inaccessible: returned 5
+ret, inaccessible: returned 5
+ret-imm, inaccessible: returned 5
+ret-imm, inaccessible: returned 5
+mov-ret, inaccessible: returned 7
+mov-ret, inaccessible: returned 7
+jmp-back, inaccessible: returned 5
+jmp-back, inaccessible: returned 5
+fall-off, inaccessible: SIGSEGV at end+0, address end+0, eax 6
+fall-off, inaccessible: SIGSEGV at end+0, address end+0, eax 6
+partial, inaccessible: SIGSEGV at end-3, address end+0, eax 5
+partial, inaccessible: SIGSEGV at end-3, address end+0, eax 5
+inc-partial, inaccessible: SIGSEGV at end-3, address end+0, eax 6
+inc-partial, inaccessible: SIGSEGV at end-3, address end+0, eax 6
+inc-no-modrm, inaccessible: SIGSEGV at end-1, address end+0, eax 6
+inc-no-modrm, inaccessible: SIGSEGV at end-1, address end+0, eax 6
+int3, inaccessible: SIGTRAP at end+0, eax 5
+int3, inaccessible: SIGTRAP at end+0, eax 5
+ud2, inaccessible: SIGILL at end-2, eax 5
+ud2, inaccessible: SIGILL at end-2, eax 5
+all done

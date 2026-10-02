@@ -353,6 +353,14 @@ typedef enum {
 void
 os_forge_exception(app_pc exception_address, dr_exception_type_t type);
 
+/* Like os_forge_exception(), but for a fault that accesses access_address, which
+ * can differ from exception_address: e.g., an UNREADABLE_MEMORY_EXECUTION_EXCEPTION
+ * for an instruction that extends into unreadable memory.
+ */
+void
+os_forge_exception_access(app_pc exception_address, app_pc access_address,
+                          dr_exception_type_t type);
+
 /* events for dumpcore_mask */
 /* NOTE with DUMPCORE_DEADLOCK and DUMPCORE_ASSERT you will get 2 dumps for
  * rank order violations in debug builds */
