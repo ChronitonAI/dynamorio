@@ -31,7 +31,8 @@
  */
 
 /* Tests dr_futex_wait_at_safe_spot(): a thread waits in a clean call, in a system
- * call event and in a signal event while another thread flushes the code cache,
+ * call event and in the signal event, for a fault in the code cache and for an
+ * instruction that DR cannot decode, while another thread flushes the code cache,
  * which must not have to wait for the waiting thread.  The waiting thread is then
  * woken with FUTEX_WAKE by the other thread and must continue correctly.
  * See futex_wait_safe_spot.dll.c.
@@ -88,6 +89,16 @@ waiter(void *arg)
     MARKER(MARKER_WAIT_IN_SIGNAL, &gate[PHASE_SIGNAL]);
     __asm__ __volatile__("ud2");
     print("waiter: resumed after the signal wait, gate %d\n", gate[PHASE_SIGNAL]);
+
+    print("waiter: waiting in a signal event for an undecodable instruction\n");
+    /* fe /6 is an invalid instruction, which DR cannot decode: it raises the SIGILL
+     * itself when it builds the block that starts there, and calls the signal event
+     * from its dispatcher rather than from its signal handler.  The client waits
+     * there and then skips the instruction.
+     */
+    MARKER(MARKER_WAIT_IN_DECODE_SIGNAL, &gate[PHASE_DECODE_SIGNAL]);
+    __asm__ __volatile__(".byte 0xfe, 0x30");
+    print("waiter: resumed after the signal wait, gate %d\n", gate[PHASE_DECODE_SIGNAL]);
 
     /* Check that the state of this thread survived. */
     for (i = 0; i < 10; i++)

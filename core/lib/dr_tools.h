@@ -958,12 +958,16 @@ DR_API
  * While blocked, the thread is at a safe spot for DR with the application state
  * \p mc, so operations that suspend all threads, such as dr_flush_region(),
  * dr_suspend_all_other_threads(), code cache resets and the application's fork
- * and exit_group system calls, do not wait for it to return.  \p mc must hold the
+ * and exit_group system calls, do not wait for it to return, and neither do
+ * flushes that unlink fragments without suspending all threads, such as
+ * dr_unlink_flush_region() and dr_delay_flush_region().  \p mc must hold the
  * thread's current application state, as obtained by dr_get_mcontext() with
  * #DR_MC_ALL, with the pc at which the application will resume.
  *
  * This routine may be called from a clean call and from the pre-system-call,
- * post-system-call and signal events.  The caller must not hold any locks.
+ * post-system-call and signal events, including the signal event for a fault
+ * that DR raises itself, e.g., for an instruction that it cannot decode.  The
+ * caller must not hold any locks.
  * Because other threads may have flushed the code cache while this thread
  * waited:
  * - From a clean call, do not return normally: resume the application with

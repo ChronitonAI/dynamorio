@@ -3997,6 +3997,7 @@ dr_futex_wait_at_safe_spot(void *drcontext, volatile int *futex, int val,
                            dr_mcontext_t *mc)
 {
     dcontext_t *dcontext = (dcontext_t *)drcontext;
+    bool waslinking, res;
     CLIENT_ASSERT(!standalone_library, "API not supported in standalone mode");
     CLIENT_ASSERT(dcontext != NULL && dcontext == get_thread_private_dcontext(),
                   "drcontext must be that of the calling thread");
@@ -4007,8 +4008,24 @@ dr_futex_wait_at_safe_spot(void *drcontext, volatile int *futex, int val,
                   "mcontext must be for DR_MC_ALL");
     CLIENT_ASSERT(OWN_NO_LOCKS(dcontext),
                   "dr_futex_wait_at_safe_spot: caller must not hold any locks");
-    return os_futex_wait_at_safe_spot(dcontext, futex, val,
-                                      dr_mcontext_as_priv_mcontext(mc));
+    /* The signal event for a signal that d_r_dispatch() delivers (one that DR raises
+     * itself, e.g., for an instruction that it cannot decode, or one that arrived
+     * while the thread was in DR code) is called while the thread is couldbelinking.
+     * A flush that unlinks fragments waits for every couldbelinking thread to become
+     * nolinking, which this thread would not do before the wait ends, so it is
+     * nolinking while it waits.  Should its last fragment be deleted meanwhile, these
+     * synch points replace its last exit with a copy, as any other synch point does.
+     */
+    waslinking = is_couldbelinking(dcontext);
+    if (waslinking)
+        enter_nolinking(dcontext, dcontext->last_fragment, false /*not to the cache*/);
+    res = os_futex_wait_at_safe_spot(dcontext, futex, val,
+                                     dr_mcontext_as_priv_mcontext(mc));
+    if (waslinking) {
+        enter_couldbelinking(dcontext, dcontext->last_fragment,
+                             false /*not from the cache*/);
+    }
+    return res;
 }
 #endif
 
