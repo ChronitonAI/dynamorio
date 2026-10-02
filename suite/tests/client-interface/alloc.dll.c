@@ -682,6 +682,12 @@ bb_event(void *drcontext, void *tag, instrlist_t *bb, bool for_trace, bool trans
                     if (!TESTALL(DR_MEMPROT_WRITE | DR_MEMPROT_PRETEND_WRITE, info.prot))
                         dr_fprintf(STDERR, "error: not pretend-writable\n");
 
+                    if (!dr_memory_is_pretend_writable(pc))
+                        dr_fprintf(STDERR, "error: not pretend-writable\n");
+                    /* Writable memory without code is really writable. */
+                    if (dr_memory_is_pretend_writable((byte *)&info))
+                        dr_fprintf(STDERR, "error: stack is pretend-writable\n");
+
 #ifdef WINDOWS
                     if (dr_virtual_query(pc, &mbi, sizeof(mbi)) != sizeof(mbi))
                         dr_fprintf(STDERR, "error: unable to query code prot\n");

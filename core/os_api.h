@@ -802,4 +802,17 @@ DR_API
 bool
 dr_memory_is_in_client(const byte *pc);
 
+DR_API
+/**
+ * Returns true iff DR made the memory at \p pc read-only, for instance to detect
+ * writes to code it built from that memory, while it pretends to the application
+ * that the memory is writable: that is, iff dr_query_memory() and
+ * dr_query_memory_ex() would include #DR_MEMPROT_PRETEND_WRITE in the protection
+ * they return for \p pc.  Unlike those routines, this one does not query the
+ * operating system, so it is cheap enough to call for every page of a large
+ * region.
+ */
+bool
+dr_memory_is_pretend_writable(const byte *pc);
+
 #endif /* _DR_OS_UTILS_H_ */
