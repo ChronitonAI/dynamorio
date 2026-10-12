@@ -5,6 +5,7 @@ fault at the expected pc
 getpid plain: correct
 getpid marked: correct
 loops done
+valgrind request: answered
 all done
 markers executed: 1003
 bb event: called, when translating: called
