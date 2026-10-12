@@ -122,10 +122,24 @@ main(int argc, char **argv)
     /* mov $100, %ecx; 1: marker; dec %ecx; jnz 1b; mov $6, %eax; ret */
     static const byte loop_marked[] = { 0xb9, 0x64, 0x00, 0x00, 0x00, MARKER, 0xff, 0xc9,
                                         0x75, 0xf5, 0xb8, 0x06, 0x00, 0x00, 0x00, 0xc3 };
+    /* A Valgrind client request (RUNNING_ON_VALGRIND, the request block at %rdi, the
+     * default result 0): mov %rdi, %rax; xor %edx, %edx; rol $3, %rdi; rol $13, %rdi;
+     * rol $61, %rdi; rol $51, %rdi; xchg %rbx, %rbx; mov %rdx, %rax; ret
+     */
+    static const byte vg_request[] = { 0x48, 0x89, 0xf8, 0x31, 0xd2, 0x48, 0xc1, 0xc7,
+                                       0x03, 0x48, 0xc1, 0xc7, 0x0d, 0x48, 0xc1, 0xc7,
+                                       0x3d, 0x48, 0xc1, 0xc7, 0x33, 0x48, 0x87, 0xdb,
+                                       0x48, 0x89, 0xd0, 0xc3 };
     /* clang-format on */
+    /* RUNNING_ON_VALGRIND, five unused arguments and the default result (DR reads the
+     * default from here; Valgrind's request block ends before it).
+     */
+    static long vg_args[7] = { 0x1001, 0, 0, 0, 0, 0, 0 };
+    long vg_result;
     size_t pg = PAGE_SIZE;
     size_t offs_plain, offs_marked, offs_fault_plain, offs_fault_marked;
     size_t offs_getpid_plain, offs_getpid_marked, offs_loop_plain, offs_loop_marked;
+    size_t offs_vg_request;
     int i;
 
     code = mmap(NULL, pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -142,6 +156,7 @@ main(int argc, char **argv)
     offs_getpid_marked = put(getpid_marked, sizeof(getpid_marked));
     offs_loop_plain = put(loop_plain, sizeof(loop_plain));
     offs_loop_marked = put(loop_marked, sizeof(loop_marked));
+    offs_vg_request = put(vg_request, sizeof(vg_request));
     if (mprotect(code, pg, PROT_READ | PROT_EXEC) != 0) {
         print("mprotect failed\n");
         return 1;
@@ -168,6 +183,14 @@ main(int argc, char **argv)
             print("loop failed\n");
     }
     print("loops done\n");
+
+    /* A block the filter leaves alone in which DR finds an annotation, which makes DR
+     * build the block again with a full decode: the new build must record the block's
+     * page again.  (DR's annotation support makes the result 1; natively it is 0.)
+     */
+    vg_result = call_at(offs_vg_request, vg_args);
+    print("valgrind request: %s\n",
+          vg_result == 0 || vg_result == 1 ? "answered" : "wrong");
 
     print("all done\n");
     return 0;

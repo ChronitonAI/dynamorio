@@ -725,6 +725,21 @@ check_new_page_start(dcontext_t *dcontext, build_bb_t *bb)
         reset_overlap_info(dcontext, bb);
 }
 
+/* Discards the vmlist of a bb whose building starts over, and has the new build check
+ * its start page again: check_new_page_contig() does not revisit pages below
+ * bb->checked_end, so without that the start page's vmarea would be missing from the
+ * new vmlist (and with nothing else on it, vm_area_add_fragment() would get NULL).
+ */
+static void
+restart_bb_vmlist(dcontext_t *dcontext, build_bb_t *bb)
+{
+    if (bb->vmlist != NULL) {
+        vm_area_destroy_list(dcontext, bb->vmlist);
+        bb->vmlist = NULL;
+    }
+    bb->checked_start_vmarea = false;
+}
+
 /* Walk forward in straight line from prev_pc to new_pc.
  * XXX: with checked_end we don't need to call this on every contig end
  * while bb building like we used to.  Should revisit the overlap info and
@@ -3411,10 +3426,7 @@ build_bb_ilist_common(dcontext_t *dcontext, build_bb_t *bb)
                         KSTOP(bb_decoding);
                         instr_destroy(dcontext, bb->instr);
                         instrlist_clear_and_destroy(dcontext, bb->ilist);
-                        if (bb->vmlist != NULL) {
-                            vm_area_destroy_list(dcontext, bb->vmlist);
-                            bb->vmlist = NULL;
-                        }
+                        restart_bb_vmlist(dcontext, bb);
                         bb->full_decode = true;
                         build_bb_ilist_common(dcontext, bb);
                         return;
@@ -4076,10 +4088,7 @@ build_bb_ilist_common(dcontext_t *dcontext, build_bb_t *bb)
                 "incompatible vmarea\n");
         STATS_INC(num_bb_end_early);
         instrlist_clear_and_destroy(dcontext, bb->ilist);
-        if (bb->vmlist != NULL) {
-            vm_area_destroy_list(dcontext, bb->vmlist);
-            bb->vmlist = NULL;
-        }
+        restart_bb_vmlist(dcontext, bb);
         /* Remove FRAG_HAS_DIRECT_CTI, since we're turning off follow_direct.
          * Try to keep the known flags.  We stopped the bb before merging in any
          * incompatible flags.
@@ -4575,10 +4584,7 @@ mangle_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
                 "*** must rebuild bb to avoid invalid instr in middle ***\n");
             STATS_INC(num_bb_end_early);
             instrlist_clear_and_destroy(dcontext, bb->ilist);
-            if (bb->vmlist != NULL) {
-                vm_area_destroy_list(dcontext, bb->vmlist);
-                bb->vmlist = NULL;
-            }
+            restart_bb_vmlist(dcontext, bb);
             bb->flags = FRAG_SELFMOD_SANDBOXED; /* lose all other flags */
             bb->full_decode = true;             /* full decode this time! */
             bb->follow_direct = false;
