@@ -1208,7 +1208,10 @@ symbol_iterator_next_noread(elf_symbol_iterator_t *iter)
             return iter->cur_sym;
         }
     }
-    if (iter->hidx < iter->num_buckets) {
+    /* hidx is past the bucket whose chain we are walking: for the last bucket, it
+     * reaches num_buckets before we are done with the chain.
+     */
+    if (iter->chain_idx != 0 || iter->hidx < iter->num_buckets) {
         /* XXX: perhaps we should safe_read buckets[] and chain[] */
         if (iter->chain_idx != 0) {
             if (TESTANY(1, iter->chain[iter->chain_idx])) {
@@ -1246,6 +1249,7 @@ symbol_iterator_next(elf_symbol_iterator_t *iter)
 
     /* Stop the iteration. */
     iter->nohash_count = 0;
+    iter->chain_idx = 0;
     iter->hidx = 0;
     iter->num_buckets = 0;
     iter->symbol = NULL;
