@@ -91,9 +91,12 @@ typedef struct _elf_symbol_iterator_t {
 #    define STT_GNU_IFUNC STT_LOOS
 #endif
 
-/* forward declaration */
+/* forward declarations */
+static size_t
+module_hashtab_header_size(os_module_data_t *os_data);
+
 static void
-module_hashtab_init(os_module_data_t *os_data);
+module_hashtab_init(os_module_data_t *os_data, app_pc header, app_pc mod_end);
 
 /* Question : how is the size of the initial map determined?  There seems to be no better
  * way than to walk the program headers and find the largest virtual offset.  You'd think
@@ -167,10 +170,10 @@ static app_pc
 elf_dt_abs_addr(ELF_DYNAMIC_ENTRY_TYPE *dyn, app_pc base, size_t size, size_t view_size,
                 ptr_int_t load_delta, bool at_map, bool dyn_reloc)
 {
-    /* XXX - if at_map this needs to be adjusted if not in the first segment
-     * since we haven't re-mapped later ones yet. Since it's read only I've
-     * never seen it not be in the first segment, but should fix or at least
-     * check. PR 307610.
+    /* If at_map, the target is not in place yet if it is in a segment whose file
+     * offset differs from its offset in the image, since we haven't re-mapped
+     * later ones yet (PR 307610).  i#3385: module_fill_os_data() only reads
+     * through it once it is (see module_image_holds()).
      */
     /* PR 307687, i#1589: modern ld.so on pretty much all platforms manually
      * relocates the .dynamic entries.  The ELF spec is adamant that dynamic
@@ -201,6 +204,36 @@ elf_dt_abs_addr(ELF_DYNAMIC_ENTRY_TYPE *dyn, app_pc base, size_t size, size_t vi
     return tgt;
 }
 
+/* Returns the segment of os_data that holds [addr, addr + size), or NULL. */
+static module_segment_t *
+module_segment_holding(os_module_data_t *os_data, app_pc addr, size_t size)
+{
+    uint i;
+    for (i = 0; i < os_data->num_segments; i++) {
+        module_segment_t *seg = &os_data->segments[i];
+        if (addr >= seg->start && addr < seg->end && size <= (size_t)(seg->end - addr))
+            return seg;
+    }
+    return NULL;
+}
+
+/* i#3385: Returns whether [addr, addr + size) of the image of the module whose data
+ * os_data holds is mapped yet: whether it is in a segment that the loader's initial
+ * mapping of the file holds in place or that the loader has mapped since.  Other
+ * segments, such as one that patchelf appends to the end of the file, hold other
+ * data until then.  Without segment data in os_data, the caller knows the image to
+ * be mapped.
+ */
+static bool
+module_image_holds(os_module_data_t *os_data, app_pc addr, size_t size)
+{
+    module_segment_t *seg;
+    if (os_data == NULL || os_data->num_segments == 0)
+        return true;
+    seg = module_segment_holding(os_data, addr, size);
+    return seg != NULL && seg->mapped;
+}
+
 /* common code to fill os_module_data_t for loader and module_area_t */
 static bool
 module_fill_os_data(ELF_PROGRAM_HEADER_TYPE *prog_hdr, /* PT_DYNAMIC entry */
@@ -226,6 +259,8 @@ module_fill_os_data(ELF_PROGRAM_HEADER_TYPE *prog_hdr, /* PT_DYNAMIC entry */
     dcontext_t *dcontext = get_thread_private_dcontext();
     /* i#489, DT_SONAME is optional, init soname to NULL first */
     *soname = NULL;
+    if (out_data != NULL)
+        out_data->soname_deferred = NULL;
 #ifdef ANDROID
     /* On Android only the first segment is mapped in and .dynamic is not
      * accessible.  We try to avoid the cost of the fault.
@@ -238,25 +273,39 @@ module_fill_os_data(ELF_PROGRAM_HEADER_TYPE *prog_hdr, /* PT_DYNAMIC entry */
     if ((app_pc)dyn > base + view_size)
         return false;
 #endif
+    /* i#3385: .dynamic is not there yet if the loader's initial mapping of the file
+     * does not reach its file offset, as when patchelf moves it to a new segment at
+     * the end of the file, or, after that mapping, if it is in a segment that the
+     * loader has yet to map.  We read it once the loader maps it
+     * (os_module_segment_mapped()).
+     */
+    if (at_map ? prog_hdr->p_offset + prog_hdr->p_filesz > view_size
+               : !module_image_holds(out_data, (app_pc)dyn, prog_hdr->p_filesz)) {
+        LOG(GLOBAL, LOG_INTERP | LOG_VMAREAS, 2,
+            "%s: .dynamic at " PFX " not mapped yet\n", __FUNCTION__,
+            prog_hdr->p_vaddr + load_delta);
+        return false;
+    }
 
     TRY_EXCEPT_ALLOW_NO_DCONTEXT(
         dcontext,
         {
             int soname_index = -1;
             char *dynstr = NULL;
+            size_t dynstr_size = 0;
             size_t sz = mod_max_end - mod_base;
             while (dyn->d_tag != DT_NULL) {
                 if (dyn->d_tag == DT_SONAME) {
                     soname_index = dyn->d_un.d_val;
-                    if (dynstr != NULL)
-                        break;
                 } else if (dyn->d_tag == DT_STRTAB) {
                     dynstr = (char *)elf_dt_abs_addr(dyn, base, sz, view_size, load_delta,
                                                      at_map, dyn_reloc);
                     if (out_data != NULL)
                         out_data->dynstr = (app_pc)dynstr;
-                    if (soname_index != -1 && out_data == NULL)
-                        break; /* done w/ DT entries */
+                } else if (dyn->d_tag == DT_STRSZ) {
+                    dynstr_size = (size_t)dyn->d_un.d_val;
+                    if (out_data != NULL)
+                        out_data->dynstr_size = dynstr_size;
                 } else if (out_data != NULL) {
                     if (dyn->d_tag == DT_SYMTAB) {
                         out_data->dynsym = elf_dt_abs_addr(dyn, base, sz, view_size,
@@ -271,8 +320,6 @@ module_fill_os_data(ELF_PROGRAM_HEADER_TYPE *prog_hdr, /* PT_DYNAMIC entry */
                         out_data->hashtab = elf_dt_abs_addr(
                             dyn, base, sz, view_size, load_delta, at_map, dyn_reloc);
                         out_data->hash_is_gnu = true;
-                    } else if (dyn->d_tag == DT_STRSZ) {
-                        out_data->dynstr_size = (size_t)dyn->d_un.d_val;
                     } else if (dyn->d_tag == DT_SYMENT) {
                         out_data->symentry_size = (size_t)dyn->d_un.d_val;
                     } else if (dyn->d_tag == DT_RUNPATH) {
@@ -294,19 +341,21 @@ module_fill_os_data(ELF_PROGRAM_HEADER_TYPE *prog_hdr, /* PT_DYNAMIC entry */
                 if ((app_pc)*soname < base || (app_pc)*soname > base + sz) {
                     ASSERT_CURIOSITY(false && "soname not in module");
                     *soname = NULL;
-                } else if (at_map && (app_pc)*soname > base + view_size) {
-                    ASSERT_CURIOSITY(false && "soname not in initial map");
+                } else if (!module_image_holds(
+                               out_data, (app_pc)dynstr,
+                               MAX(dynstr_size, (size_t)soname_index + 1))) {
+                    /* i#3385: .dynstr is not mapped yet, as when patchelf moves
+                     * it to a new segment at the end of the file.  We read the
+                     * soname once the loader maps its segment.
+                     */
+                    if (out_data != NULL)
+                        out_data->soname_deferred = (app_pc)*soname;
                     *soname = NULL;
                 }
 
                 /* test string readability while still in try/except
                  * in case we screwed up somewhere or module is
                  * malformed/only partially mapped.
-                 *
-                 * i#3385: strlen fails here in case when .dynstr is
-                 * placed in the end of segment (thus soname is not mapped
-                 * at the moment). We'll try to re-init module data again
-                 * in instrument_module_load_trigger() at first execution.
                  */
                 if (*soname != NULL && strlen(*soname) == -1) {
                     ASSERT_NOT_REACHED();
@@ -315,13 +364,25 @@ module_fill_os_data(ELF_PROGRAM_HEADER_TYPE *prog_hdr, /* PT_DYNAMIC entry */
             if (out_data != NULL) {
                 /* we put module_hashtab_init here since it should always be called
                  * together with module_fill_os_data and it updates os_data.
+                 * i#3385: As for the soname, we read the hash table header once
+                 * the loader maps it if it is not mapped yet.
                  */
-                module_hashtab_init(out_data);
+                app_pc header = out_data->hashtab;
+                if (header != NULL &&
+                    !module_image_holds(out_data, header,
+                                        module_hashtab_header_size(out_data)))
+                    header = NULL;
+                module_hashtab_init(out_data, header, base + sz);
             }
         },
         { /* EXCEPT */
           ASSERT_CURIOSITY(false && "crashed while walking dynamic header");
           *soname = NULL;
+          if (out_data != NULL) {
+              /* A later retry reads it all. */
+              out_data->hashtab_deferred = false;
+              out_data->soname_deferred = NULL;
+          }
           res = false;
         });
     if (res && out_data != NULL)
@@ -350,6 +411,7 @@ module_walk_program_headers(app_pc base, size_t view_size, bool at_map, bool dyn
     char *soname = NULL;
     bool found_load = false;
     ELF_HEADER_TYPE *elf_hdr = (ELF_HEADER_TYPE *)base;
+    ELF_PROGRAM_HEADER_TYPE *dyn_hdr = NULL;
     ptr_int_t load_delta; /* delta loaded at relative to base */
     uint last_seg_align = 0;
     ASSERT(is_elf_so_header(base, view_size));
@@ -382,36 +444,53 @@ module_walk_program_headers(app_pc base, size_t view_size, bool at_map, bool dyn
                                             i * elf_hdr->e_phentsize);
             if (prog_hdr->p_type == PT_LOAD) {
                 if (out_data != NULL) {
+                    app_pc seg_start = (app_pc)(prog_hdr->p_vaddr + load_delta);
                     last_seg_align = prog_hdr->p_align;
                     module_add_segment_data(
-                        out_data, elf_hdr->e_phnum,
-                        (app_pc)(prog_hdr->p_vaddr + load_delta), prog_hdr->p_memsz,
+                        out_data, elf_hdr->e_phnum, seg_start, prog_hdr->p_memsz,
                         module_segment_prot_to_osprot(prog_hdr), prog_hdr->p_align,
                         false /*!shared*/, prog_hdr->p_offset);
+                    /* i#3385: If at_map, the loader has only mapped the file from
+                     * offset 0 so far, which holds a segment in place only if its
+                     * file offset matches its offset in the image.
+                     */
+                    if (at_map &&
+                        ((size_t)(seg_start - base) != prog_hdr->p_offset ||
+                         prog_hdr->p_offset + prog_hdr->p_filesz > view_size)) {
+                        module_segment_t *seg =
+                            module_segment_holding(out_data, seg_start, 0);
+                        if (seg != NULL)
+                            seg->mapped = false;
+                    }
                 }
                 found_load = true;
-            }
-            if ((out_soname != NULL || out_data != NULL) &&
-                prog_hdr->p_type == PT_DYNAMIC) {
-                module_fill_os_data(prog_hdr, mod_base, max_end, base, view_size, at_map,
-                                    dyn_reloc, load_delta, &soname, out_data);
-                DOLOG(LOG_INTERP | LOG_VMAREAS, 2, {
-                    if (out_data != NULL) {
-                        LOG(GLOBAL, LOG_INTERP | LOG_VMAREAS, 2,
-                            "%s " PFX ": %s dynamic info\n", __FUNCTION__, base,
-                            out_data->have_dynamic_info ? "have" : "no");
-                        /* i#1860: on 32-bit Android a later
-                         * os_module_update_dynamic_info() will fill in info
-                         * once .dynamic is mapped in.
-                         * i#7215: This is not needed on newer versions of 64-bit
-                         * Android, however we are not able to test with newer
-                         * versions of 32-bit Android, so this may still be
-                         * required.
-                         */
-                        IF_NOT_ANDROID32(ASSERT(out_data->have_dynamic_info));
-                    }
-                });
-            }
+            } else if (prog_hdr->p_type == PT_DYNAMIC)
+                dyn_hdr = prog_hdr;
+        }
+        /* We read .dynamic once we know all segments (i#3385). */
+        if ((out_soname != NULL || out_data != NULL) && dyn_hdr != NULL) {
+            module_fill_os_data(dyn_hdr, mod_base, max_end, base, view_size, at_map,
+                                dyn_reloc, load_delta, &soname, out_data);
+            DOLOG(LOG_INTERP | LOG_VMAREAS, 2, {
+                if (out_data != NULL) {
+                    LOG(GLOBAL, LOG_INTERP | LOG_VMAREAS, 2,
+                        "%s " PFX ": %s dynamic info\n", __FUNCTION__, base,
+                        out_data->have_dynamic_info ? "have" : "no");
+                    /* i#1860: on 32-bit Android a later
+                     * os_module_update_dynamic_info() will fill in info
+                     * once .dynamic is mapped in.
+                     * i#7215: This is not needed on newer versions of 64-bit
+                     * Android, however we are not able to test with newer
+                     * versions of 32-bit Android, so this may still be
+                     * required.
+                     * i#3385: Likewise if .dynamic is not in the loader's initial
+                     * mapping of the file.
+                     */
+                    IF_NOT_ANDROID32(ASSERT(
+                        out_data->have_dynamic_info ||
+                        (at_map && dyn_hdr->p_offset + dyn_hdr->p_filesz > view_size)));
+                }
+            });
         }
         if (max_end + load_delta < base + view_size) {
             /* i#3900: in-memory-only VDSO has a "loaded" portion not in a PT_LOAD
@@ -461,6 +540,40 @@ module_num_program_headers(app_pc base)
     return elf_hdr->e_phnum;
 }
 
+/* Reads the .dynamic section of the module ma from its address in the image, of
+ * which the first view_size bytes are mapped.
+ */
+static void
+module_update_dynamic_info(module_area_t *ma, size_t view_size, bool dyn_reloc)
+{
+    uint i;
+    char *soname;
+    ptr_int_t load_delta = ma->start - ma->os_data.base_address;
+    ELF_HEADER_TYPE *elf_hdr = (ELF_HEADER_TYPE *)ma->start;
+    ASSERT(os_get_module_info_write_locked());
+    if (elf_hdr->e_phoff == 0 ||
+        elf_hdr->e_phoff + elf_hdr->e_phnum * elf_hdr->e_phentsize > ma->end - ma->start)
+        return;
+    for (i = 0; i < elf_hdr->e_phnum; i++) {
+        ELF_PROGRAM_HEADER_TYPE *prog_hdr =
+            (ELF_PROGRAM_HEADER_TYPE *)(ma->start + elf_hdr->e_phoff +
+                                        i * elf_hdr->e_phentsize);
+        if (prog_hdr->p_type == PT_DYNAMIC) {
+            module_fill_os_data(prog_hdr, ma->os_data.base_address,
+                                ma->os_data.base_address + (ma->end - ma->start),
+                                ma->start, view_size,
+                                false, /* single-segment so no file offsets */
+                                dyn_reloc, load_delta, &soname, &ma->os_data);
+            if (soname != NULL) {
+                ASSERT(ma->names.module_name == NULL);
+                ma->names.module_name = dr_strdup(soname HEAPACCT(ACCT_VMAREAS));
+            }
+            LOG(GLOBAL, LOG_INTERP | LOG_VMAREAS, 2, "%s " PFX ": %s dynamic info\n",
+                __FUNCTION__, ma->start, ma->os_data.have_dynamic_info ? "have" : "no");
+        }
+    }
+}
+
 /* The Android loader does not map the whole library file up front, so we have to
  * wait to access .dynamic when it gets mapped in.  We basically try on each ELF
  * segment until we hit the one with .dynamic.
@@ -472,35 +585,122 @@ os_module_update_dynamic_info(app_pc base, size_t size, bool at_map)
     os_get_module_info_write_lock();
     ma = module_pc_lookup(base);
     if (ma != NULL && !ma->os_data.have_dynamic_info) {
-        uint i;
-        char *soname;
-        ptr_int_t load_delta = ma->start - ma->os_data.base_address;
-        ELF_HEADER_TYPE *elf_hdr = (ELF_HEADER_TYPE *)ma->start;
         ASSERT(base >= ma->start && base + size <= ma->end);
-        if (elf_hdr->e_phoff != 0 &&
-            elf_hdr->e_phoff + elf_hdr->e_phnum * elf_hdr->e_phentsize <=
-                ma->end - ma->start) {
-            for (i = 0; i < elf_hdr->e_phnum; i++) {
-                ELF_PROGRAM_HEADER_TYPE *prog_hdr =
-                    (ELF_PROGRAM_HEADER_TYPE *)(ma->start + elf_hdr->e_phoff +
-                                                i * elf_hdr->e_phentsize);
-                if (prog_hdr->p_type == PT_DYNAMIC) {
-                    module_fill_os_data(prog_hdr, ma->os_data.base_address,
-                                        ma->os_data.base_address + (ma->end - ma->start),
-                                        /* Pretend this segment starts from base */
-                                        ma->start, base + size - ma->start,
-                                        false,   /* single-segment so no file offsets */
-                                        !at_map, /* i#1589: ld.so relocates .dynamic */
-                                        load_delta, &soname, &ma->os_data);
-                    if (soname != NULL)
-                        ma->names.module_name = dr_strdup(soname HEAPACCT(ACCT_VMAREAS));
-                    LOG(GLOBAL, LOG_INTERP | LOG_VMAREAS, 2,
-                        "%s " PFX ": %s dynamic info\n", __FUNCTION__, base,
-                        ma->os_data.have_dynamic_info ? "have" : "no");
+        module_update_dynamic_info(ma,
+                                   /* Pretend this segment starts from base */
+                                   base + size - ma->start,
+                                   !at_map /* i#1589: ld.so relocates .dynamic */);
+    }
+    os_get_module_info_write_unlock();
+}
+
+/* i#3385: Reads the data that module_fill_os_data() could not read yet because it
+ * was in segments that the loader had yet to map, from those that it has mapped
+ * since.
+ */
+static void
+module_read_deferred_dynamic_info(module_area_t *ma)
+{
+    os_module_data_t *os_data = &ma->os_data;
+    dcontext_t *dcontext = get_thread_private_dcontext();
+    ASSERT(os_get_module_info_write_locked());
+    if (!os_data->have_dynamic_info) {
+        /* module_fill_os_data() checks that .dynamic is mapped now.  The loader
+         * has yet to relocate it.
+         */
+        module_update_dynamic_info(ma, ma->end - ma->start, false /*!dyn_reloc*/);
+    }
+    if (os_data->hashtab_deferred &&
+        module_image_holds(os_data, os_data->hashtab,
+                           module_hashtab_header_size(os_data))) {
+        LOG(GLOBAL, LOG_INTERP | LOG_VMAREAS, 2, "%s: reading hash table at " PFX "\n",
+            __FUNCTION__, os_data->hashtab);
+        TRY_EXCEPT_ALLOW_NO_DCONTEXT(
+            dcontext, { module_hashtab_init(os_data, os_data->hashtab, ma->end); },
+            { /* EXCEPT */
+              ASSERT_CURIOSITY(false && "crashed while reading hash table");
+              /* module_hashtab_init() left the table unusable. */
+            });
+    }
+    if (os_data->soname_deferred != NULL &&
+        module_image_holds(
+            os_data, os_data->dynstr,
+            MAX(os_data->dynstr_size,
+                (size_t)(os_data->soname_deferred - os_data->dynstr) + 1))) {
+        char *soname = (char *)os_data->soname_deferred;
+        os_data->soname_deferred = NULL;
+        TRY_EXCEPT_ALLOW_NO_DCONTEXT(
+            dcontext,
+            {
+                /* test string readability while still in try/except */
+                if (strlen(soname) == -1) {
+                    ASSERT_NOT_REACHED();
                 }
-            }
+            },
+            { /* EXCEPT */
+              ASSERT_CURIOSITY(false && "crashed while reading soname");
+              soname = NULL;
+            });
+        LOG(GLOBAL, LOG_INTERP | LOG_VMAREAS, 2, "%s: soname %s\n", __FUNCTION__,
+            soname == NULL ? "<unreadable>" : soname);
+        if (soname != NULL) {
+            ASSERT(ma->names.module_name == NULL);
+            ma->names.module_name = dr_strdup(soname HEAPACCT(ACCT_VMAREAS));
         }
     }
+}
+
+/* i#3385: Returns whether mapping [base, base + size) from file offset offset maps
+ * segments of the module ma in place that were not mapped yet, and marks them as
+ * mapped if mark is true.
+ */
+static bool
+module_map_segments(module_area_t *ma, app_pc base, size_t size, uint64 offset, bool mark)
+{
+    bool newly_mapped = false;
+    uint i;
+    for (i = 0; i < ma->os_data.num_segments; i++) {
+        module_segment_t *seg = &ma->os_data.segments[i];
+        /* The loader maps each segment from its file offset rounded down to a
+         * page.
+         */
+        if (!seg->mapped && seg->start >= base && seg->start < base + size &&
+            offset + (seg->start - base) == ALIGN_BACKWARD(seg->offset, PAGE_SIZE)) {
+            newly_mapped = true;
+            if (!mark)
+                break;
+            LOG(GLOBAL, LOG_INTERP | LOG_VMAREAS, 2,
+                "%s: segment " PFX "-" PFX " mapped\n", __FUNCTION__, seg->start,
+                seg->end);
+            seg->mapped = true;
+        }
+    }
+    return newly_mapped;
+}
+
+/* i#3385: Called after the app maps [base, base + size) readable from file offset
+ * offset over part of a module.  If that maps segments of the module that the
+ * loader's initial mapping of the file did not hold in place, reads the data from
+ * them that we could not read before.
+ */
+void
+os_module_segment_mapped(app_pc base, size_t size, uint64 offset)
+{
+    module_area_t *ma;
+    bool newly_mapped;
+    /* This is the case once per module at most for most modules: check under the
+     * read lock first.
+     */
+    os_get_module_info_lock();
+    ma = module_pc_lookup(base);
+    newly_mapped = ma != NULL && module_map_segments(ma, base, size, offset, false);
+    os_get_module_info_unlock();
+    if (!newly_mapped)
+        return;
+    os_get_module_info_write_lock();
+    ma = module_pc_lookup(base);
+    if (ma != NULL && module_map_segments(ma, base, size, offset, true))
+        module_read_deferred_dynamic_info(ma);
     os_get_module_info_write_unlock();
 }
 
@@ -536,36 +736,88 @@ module_read_program_header(app_pc base, uint segment_num,
     return false;
 }
 
-/* fill os_module_data_t for hashtable lookup */
-static void
-module_hashtab_init(os_module_data_t *os_data)
+/* Returns the size of the header of os_data's hash table. */
+static size_t
+module_hashtab_header_size(os_module_data_t *os_data)
 {
-    if (os_data->hashtab != NULL) {
-        /* set up symbol lookup fields */
-        if (os_data->hash_is_gnu) {
-            /* .gnu.hash format.  can't find good docs for it. */
-            Elf32_Word bitmask_nwords;
-            Elf32_Word *htab = (Elf32_Word *)os_data->hashtab;
-            os_data->num_buckets = (size_t)*htab++;
-            os_data->gnu_symbias = *htab++;
-            bitmask_nwords = *htab++;
-            os_data->gnu_bitidx = (ptr_uint_t)(bitmask_nwords - 1);
-            os_data->gnu_shift = (ptr_uint_t)*htab++;
-            os_data->gnu_bitmask = (app_pc)htab;
-            htab += ELF_WORD_SIZE / 32 * bitmask_nwords;
-            os_data->buckets = (app_pc)htab;
-            htab += os_data->num_buckets;
-            os_data->chain = (app_pc)(htab - os_data->gnu_symbias);
-        } else {
-            /* sysv .hash format: nbuckets; nchain; buckets[]; chain[] */
-            Elf_Symndx *htab = (Elf_Symndx *)os_data->hashtab;
-            os_data->num_buckets = (size_t)*htab++;
-            os_data->num_chain = (size_t)*htab++;
-            os_data->buckets = (app_pc)htab;
-            os_data->chain = (app_pc)(htab + os_data->num_buckets);
-        }
-        ASSERT(os_data->symentry_size == sizeof(ELF_SYM_TYPE));
+    /* .gnu.hash: nbuckets, symbias, bitmask_nwords, shift.
+     * .hash: nbuckets, nchain.
+     */
+    return os_data->hash_is_gnu ? 4 * sizeof(Elf32_Word) : 2 * sizeof(Elf_Symndx);
+}
+
+/* Fills in os_data's hash table fields for symbol lookup, from the table's header
+ * read at header: os_data->hashtab, or NULL if it cannot be read yet (i#3385), in
+ * which case the table is marked as deferred.  Until the fields are set from a
+ * valid header (with all tables below mod_end) of a module with .dynsym and
+ * .dynstr, num_buckets is 0, which disables lookups.
+ */
+static void
+module_hashtab_init(os_module_data_t *os_data, app_pc header, app_pc mod_end)
+{
+    os_data->num_buckets = 0;
+    os_data->num_chain = 0;
+    os_data->buckets = NULL;
+    os_data->chain = NULL;
+    os_data->gnu_bitmask = NULL;
+    os_data->gnu_shift = 0;
+    os_data->gnu_bitidx = 0;
+    os_data->gnu_symbias = 0;
+    os_data->hashtab_deferred = false;
+    if (os_data->hashtab == NULL || os_data->dynsym == NULL || os_data->dynstr == NULL)
+        return;
+    if (header == NULL) {
+        LOG(GLOBAL, LOG_INTERP | LOG_VMAREAS, 2,
+            "%s: hash table at " PFX " not mapped yet\n", __FUNCTION__, os_data->hashtab);
+        os_data->hashtab_deferred = true;
+        return;
     }
+    if (os_data->hash_is_gnu) {
+        /* .gnu.hash format: the header; bitmask_nwords ELF_ADDR words of Bloom
+         * filter; nbuckets buckets; chain entries from the symbias'th symbol on.
+         */
+        Elf32_Word *htab = (Elf32_Word *)header;
+        size_t num_buckets = htab[0];
+        Elf32_Word symbias = htab[1];
+        Elf32_Word bitmask_nwords = htab[2];
+        Elf32_Word shift = htab[3];
+        app_pc bitmask = os_data->hashtab + module_hashtab_header_size(os_data);
+        size_t avail = mod_end > bitmask ? mod_end - bitmask : 0;
+        if (num_buckets == 0 || bitmask_nwords == 0 || !IS_POWER_OF_2(bitmask_nwords) ||
+            shift >= sizeof(Elf32_Word) * 8 ||
+            bitmask_nwords > avail / sizeof(ELF_ADDR) ||
+            num_buckets >
+                (avail - bitmask_nwords * sizeof(ELF_ADDR)) / sizeof(Elf32_Word)) {
+            LOG(GLOBAL, LOG_INTERP | LOG_VMAREAS, 1,
+                "%s: invalid .gnu.hash header at " PFX "\n", __FUNCTION__,
+                os_data->hashtab);
+            return;
+        }
+        os_data->gnu_symbias = symbias;
+        os_data->gnu_bitidx = (ptr_uint_t)(bitmask_nwords - 1);
+        os_data->gnu_shift = (ptr_uint_t)shift;
+        os_data->gnu_bitmask = bitmask;
+        os_data->buckets = bitmask + bitmask_nwords * sizeof(ELF_ADDR);
+        os_data->chain = (app_pc)((Elf32_Word *)os_data->buckets + num_buckets - symbias);
+        os_data->num_buckets = num_buckets;
+    } else {
+        /* sysv .hash format: nbuckets; nchain; buckets[]; chain[] */
+        Elf_Symndx *htab = (Elf_Symndx *)header;
+        size_t num_buckets = htab[0];
+        size_t num_chain = htab[1];
+        app_pc buckets = os_data->hashtab + module_hashtab_header_size(os_data);
+        size_t avail = (mod_end > buckets ? mod_end - buckets : 0) / sizeof(Elf_Symndx);
+        if (num_buckets == 0 || num_buckets > avail || num_chain > avail - num_buckets) {
+            LOG(GLOBAL, LOG_INTERP | LOG_VMAREAS, 1,
+                "%s: invalid .hash header at " PFX "\n", __FUNCTION__, os_data->hashtab);
+            return;
+        }
+        os_data->num_chain = num_chain;
+        os_data->buckets = buckets;
+        os_data->chain = (app_pc)((Elf_Symndx *)buckets + num_buckets);
+        os_data->num_buckets = num_buckets;
+    }
+    ASSERT(os_data->symentry_size == sizeof(ELF_SYM_TYPE));
 }
 
 app_pc
@@ -731,7 +983,8 @@ app_pc
 get_proc_address_from_os_data(os_module_data_t *os_data, ptr_int_t load_delta,
                               const char *name, DR_PARAM_OUT bool *is_indirect_code)
 {
-    if (os_data->hashtab != NULL) {
+    /* num_buckets is 0 if there is no usable hash table (yet: i#3385). */
+    if (os_data->num_buckets > 0) {
         Elf_Symndx *buckets = (Elf_Symndx *)os_data->buckets;
         Elf_Symndx *chain = (Elf_Symndx *)os_data->chain;
         ELF_SYM_TYPE *symtab = (ELF_SYM_TYPE *)os_data->dynsym;
@@ -1208,7 +1461,10 @@ symbol_iterator_next_noread(elf_symbol_iterator_t *iter)
             return iter->cur_sym;
         }
     }
-    if (iter->hidx < iter->num_buckets) {
+    /* hidx is past the bucket whose chain we are walking: for the last bucket, it
+     * reaches num_buckets before we are done with the chain.
+     */
+    if (iter->chain_idx != 0 || iter->hidx < iter->num_buckets) {
         /* XXX: perhaps we should safe_read buckets[] and chain[] */
         if (iter->chain_idx != 0) {
             if (TESTANY(1, iter->chain[iter->chain_idx])) {
@@ -1246,6 +1502,7 @@ symbol_iterator_next(elf_symbol_iterator_t *iter)
 
     /* Stop the iteration. */
     iter->nohash_count = 0;
+    iter->chain_idx = 0;
     iter->hidx = 0;
     iter->num_buckets = 0;
     iter->symbol = NULL;
@@ -1273,7 +1530,11 @@ symbol_iterator_start(module_handle_t handle)
     iter->cur_sym = iter->dynsym;
     iter->load_delta = ma->start - ma->os_data.base_address;
 
-    if (ma->os_data.hash_is_gnu) {
+    if (ma->os_data.num_buckets == 0) {
+        /* There is no usable hash table (yet: i#3385), from which we take the
+         * number of symbols: we iterate over nothing.
+         */
+    } else if (ma->os_data.hash_is_gnu) {
         /* See https://blogs.oracle.com/ali/entry/gnu_hash_elf_sections
          * "With GNU hash, the dynamic symbol table is divided into two
          * parts. The first part receives the symbols that can be omitted
@@ -1298,7 +1559,8 @@ symbol_iterator_start(module_handle_t handle)
         iter->hidx = 0;
         iter->num_buckets = 0;
     }
-    ASSERT_CURIOSITY(iter->cur_sym->st_name == 0); /* ok to skip 1st */
+    ASSERT_CURIOSITY(ma->os_data.num_buckets == 0 ||
+                     iter->cur_sym->st_name == 0); /* ok to skip 1st */
     symbol_iterator_next(iter);
 
     os_get_module_info_unlock();

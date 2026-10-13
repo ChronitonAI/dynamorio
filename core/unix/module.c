@@ -533,6 +533,8 @@ module_add_segment_data(DR_PARAM_OUT os_module_data_t *out_data,
     out_data->segments[seg].prot = segment_prot;
     out_data->segments[seg].shared = shared;
     out_data->segments[seg].offset = offset;
+    /* ELF callers clear this for a segment that the loader has yet to map. */
+    out_data->segments[seg].mapped = true;
     if (seg > 0) {
         ASSERT(out_data->segments[seg].start >= out_data->segments[seg - 1].end);
         if (out_data->segments[seg].start > out_data->segments[seg - 1].end)

@@ -1,0 +1,10 @@
+loaded library 1 with soname libclient.hashtab_segment.appdll.so
+reached the export of library 1
+libclient.hashtab_segment.appdll.so: hash table moved, .dynamic not moved, export returned 42
+loaded library 2 with soname libclient.hashtab_segment_sysv.appdll.so
+reached the export of library 2
+libclient.hashtab_segment_sysv.appdll.so: hash table moved, .dynamic not moved, export returned 42
+loaded library 3 with soname libclient.hashtab_segment.appdll.so
+reached the export of library 3
+libclient.hashtab_segment_dynamic.appdll.so: hash table moved, .dynamic moved, export returned 42
+all done
