@@ -146,25 +146,22 @@ static bool
 check_and_mark_native_exec(module_area_t *ma, bool add)
 {
     bool is_native = false;
-    const char *name = GET_MODULE_NAME(&ma->names);
     ASSERT(os_get_module_info_locked());
-    if (DYNAMO_OPTION(native_exec) && name != NULL && on_native_exec_list(name)) {
-        LOG(GLOBAL, LOG_INTERP | LOG_VMAREAS, 1, "module %s is on native_exec list\n",
-            name);
-        is_native = true;
-    }
-
-    if (add && is_native) {
-        RSTATS_INC(num_native_module_loads);
-        vmvector_add(native_exec_areas, ma->start, ma->end, NULL);
-    } else if (!add) {
-        /* If we're removing and it's native, it should be on there already.  If
-         * it's not native, then it shouldn't be present, but we'll remove
-         * whatever is there.
+    if (add) {
+        const char *name = GET_MODULE_NAME(&ma->names);
+        if (DYNAMO_OPTION(native_exec) && name != NULL && on_native_exec_list(name)) {
+            LOG(GLOBAL, LOG_INTERP | LOG_VMAREAS, 1, "module %s is on native_exec list\n",
+                name);
+            is_native = true;
+            RSTATS_INC(num_native_module_loads);
+            vmvector_add(native_exec_areas, ma->start, ma->end, NULL);
+        }
+    } else {
+        /* The module is native if we marked it native when we added it.  We do not
+         * check its name again, which can change in between: on Linux we may only
+         * read the soname once the loader maps its segment (i#3385).
          */
-        DEBUG_DECLARE(bool present =)
-        vmvector_remove(native_exec_areas, ma->start, ma->end);
-        ASSERT_CURIOSITY((is_native && present) || (!is_native && !present));
+        is_native = vmvector_remove(native_exec_areas, ma->start, ma->end);
     }
     return is_native;
 }

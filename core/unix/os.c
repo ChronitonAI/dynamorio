@@ -7529,6 +7529,7 @@ pre_system_call(dcontext_t *dcontext)
         dcontext->sys_param1 = len;
         dcontext->sys_param2 = prot;
         dcontext->sys_param3 = flags;
+        dcontext->sys_param4 = sys_param(dcontext, 5);
         break;
     }
     /* must flush stale fragments when we see munmap/mremap */
@@ -8896,10 +8897,10 @@ os_check_new_app_module(dcontext_t *dcontext, app_pc pc)
     os_get_module_info_unlock();
 }
 
-/* All processing for mmap and mmap2. */
+/* All processing for mmap and mmap2.  offset is the file offset in bytes. */
 static void
-process_mmap(dcontext_t *dcontext, app_pc base, size_t size, uint prot,
-             uint flags _IF_DEBUG(const char *map_type))
+process_mmap(dcontext_t *dcontext, app_pc base, size_t size, uint prot, uint flags,
+             uint64 offset _IF_DEBUG(const char *map_type))
 {
     if (size == 0)
         return;
@@ -8948,6 +8949,13 @@ process_mmap(dcontext_t *dcontext, app_pc base, size_t size, uint prot,
         image = true;
         DODEBUG({ map_type = "ELF SO"; });
         LOG(THREAD, LOG_SYSCALLS, 4, "mmap " PFX ": overlaps image\n", base);
+#ifdef LINUX
+        /* i#3385: The loader maps the segments over its initial mapping of the
+         * file, which only holds some of them in place.
+         */
+        if (TESTANY(MEMPROT_READ, memprot))
+            os_module_segment_mapped(base, size, offset);
+#endif
     } else if (TESTANY(MEMPROT_READ, memprot) &&
                /* i#727: We can still get SIGBUS on mmap'ed files that can't be
                 * read, so pass size=0 to use a safe_read.
@@ -9176,6 +9184,7 @@ post_system_call(dcontext_t *dcontext)
 #endif
     case IF_MACOS_ELSE(SYS_mmap, IF_X64_ELSE(SYS_mmap, SYS_mmap2)): {
         uint flags;
+        uint64 offset;
         DEBUG_DECLARE(const char *map_type;)
         RSTATS_INC(num_app_mmaps);
         base = (app_pc)MCXT_SYSCALL_RES(mc); /* For mmap, it's NOT arg->addr! */
@@ -9203,17 +9212,22 @@ post_system_call(dcontext_t *dcontext)
             size = (size_t)arg->len;
             prot = (uint)arg->prot;
             flags = (uint)arg->flags;
+            offset = (uint64)arg->offset;
             DEBUG_DECLARE(map_type = "mmap";)
         } else {
 #endif
             size = (size_t)dcontext->sys_param1;
             prot = (uint)dcontext->sys_param2;
             flags = (uint)dcontext->sys_param3;
+            /* mmap2 takes the offset in 4096-byte units. */
+            offset = IF_X64_ELSE((uint64)dcontext->sys_param4,
+                                 IF_MACOS_ELSE((uint64)dcontext->sys_param4,
+                                               (uint64)dcontext->sys_param4 << 12));
             DEBUG_DECLARE(map_type = IF_X64_ELSE("mmap2", "mmap");)
 #if defined(LINUX) && !defined(X64) && !defined(ARM)
         }
 #endif
-        process_mmap(dcontext, base, size, prot, flags _IF_DEBUG(map_type));
+        process_mmap(dcontext, base, size, prot, flags, offset _IF_DEBUG(map_type));
         break;
     }
     case SYS_munmap: {

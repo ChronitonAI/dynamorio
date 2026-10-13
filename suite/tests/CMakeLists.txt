@@ -2527,6 +2527,27 @@ if (NOT MACOS AND NOT ANDROID)
   DynamoRIO_get_full_path(modules_libname client.modules.appdll "${location_suffix}")
   tobuild_ci(client.modules client-interface/modules.c "" "" "${modules_libname}")
 endif ()
+# The layout relies on GNU ld: gold and lld keep the table at its file offset.
+if (LINUX AND NOT ANDROID AND NOT LINKER_IS_GNU_GOLD AND NOT LINKER_IS_LLVM_LLD)
+  # i#3385: Libraries whose hash table (GNU or SysV) and .dynstr are not in place in
+  # the loader's initial mapping of the file.  We put the table at 1MB in the image:
+  # GNU ld then starts a new segment there at a small file offset (for maximum page
+  # sizes of 4K to 64K), while the build ID note keeps the ELF headers in a segment
+  # of their own at 0.  The app also moves .dynamic out of that mapping in a copy
+  # of the first library, taking the place of the note's program header.
+  tobuild_appdll(client.hashtab_segment client-interface/hashtab_segment.c)
+  append_property_string(TARGET client.hashtab_segment.appdll LINK_FLAGS
+    "-Wl,--build-id -Wl,--hash-style=gnu -Wl,--section-start=.gnu.hash=0x100000")
+  DynamoRIO_get_full_path(hashtab_gnu_lib client.hashtab_segment.appdll
+    "${location_suffix}")
+  tobuild_appdll(client.hashtab_segment_sysv client-interface/hashtab_segment.c)
+  append_property_string(TARGET client.hashtab_segment_sysv.appdll LINK_FLAGS
+    "-Wl,--build-id -Wl,--hash-style=sysv -Wl,--section-start=.hash=0x100000")
+  DynamoRIO_get_full_path(hashtab_sysv_lib client.hashtab_segment_sysv.appdll
+    "${location_suffix}")
+  tobuild_ci(client.hashtab_segment client-interface/hashtab_segment.c "" ""
+    "${hashtab_gnu_lib};${hashtab_sysv_lib}")
+endif ()
 if (X86) # XXX i#1551, i#1569: port to ARM and AArch64
   tobuild_ci(client.alloc client-interface/alloc.c ""
     # For the subtest "targeting upper 2GB of low 4GB" we move -vm_base out of the

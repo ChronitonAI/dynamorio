@@ -49,6 +49,12 @@ typedef struct _module_segment_t {
     uint prot;
     bool shared; /* not unique to this module */
     uint64 offset;
+    /* ELF: whether the segment's file data is mapped at start yet (i#3385).  The
+     * loader's initial mapping of the file holds it there only if its file offset
+     * matches its offset in the image; otherwise it is there once the loader maps
+     * the segment over that initial mapping.
+     */
+    bool mapped;
 } module_segment_t;
 
 typedef struct _os_module_data_t {
@@ -91,7 +97,15 @@ typedef struct _os_module_data_t {
     ptr_uint_t gnu_shift;
     ptr_uint_t gnu_bitidx;
     size_t gnu_symbias; /* .dynsym index of first export */
-#else                   /* MACOS */
+    /* i#3385: Data in segments that were not mapped yet when we read .dynamic,
+     * to be read once they are: the hash table header (the hash table fields
+     * above are zero until then) and the soname string (names.module_name is
+     * NULL until then).  If .dynamic itself was not mapped yet,
+     * have_dynamic_info is false until it is.
+     */
+    bool hashtab_deferred;
+    app_pc soname_deferred;
+#else /* MACOS */
     byte *exports;     /* absolute addr of exports trie */
     size_t exports_sz; /* size of exports trie */
     byte *symtab;
@@ -135,6 +149,9 @@ module_num_program_headers(app_pc base);
 
 void
 os_module_update_dynamic_info(app_pc base, size_t size, bool at_map);
+
+void
+os_module_segment_mapped(app_pc base, size_t size, uint64 offset);
 
 bool
 module_file_has_module_header(const char *filename);
